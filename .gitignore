@@ -1,0 +1,16 @@
+# Environment secrets — never commit real credentials.
+# .env.example documents the required keys with placeholder values instead.
+.env
+.env.local
+.env.*.local
+
+# Runtime data written by the stack at deploy time
+docker/logs/*
+!docker/logs/.gitkeep
+docker/backups/*
+!docker/backups/.gitkeep
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
