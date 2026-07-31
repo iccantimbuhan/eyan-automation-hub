@@ -1,29 +1,58 @@
-version: "3.9"
-
 services:
 
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: n8n
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
   postgres:
-    image: postgres:16
-    container_name: postgres
+    image: postgres:16-alpine
+    container_name: eyan-postgres
     restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - automation-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
-    container_name: redis
+    container_name: eyan-redis
     restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - automation-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
-  traefik:
-    image: traefik:v3.0
-    container_name: traefik
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: eyan-n8n
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+    networks:
+      - automation-network
 
 networks:
   automation-network:
@@ -31,5 +60,5 @@ networks:
 
 volumes:
   postgres-data:
-  n8n-data:
   redis-data:
+  n8n-data:
