@@ -1,0 +1,261 @@
+{
+  "id": "CrmValidationWf01",
+  "name": "CRM - 02 - Validation",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// TDD §10 Workflow 2 — required-field/format checks, before any EYAN call.\nconst lead = $json.lead || {};\nconst workflowExecutionId = $json.workflowExecutionId;\n\nconst EMAIL_RE = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\nlet reason = null;\nif (!lead.contactName || !String(lead.contactName).trim()) {\n  reason = 'Missing contactName.';\n} else if (!lead.email || !EMAIL_RE.test(lead.email)) {\n  reason = 'Missing or malformed email.';\n}\n\nreturn [{\n  json: {\n    valid: reason === null,\n    reason,\n    lead,\n    workflowExecutionId,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Payload Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [440, 0],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Mark Disqualified - Invalid Payload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [660, 180],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/crm/service/leads/{{ $json.lead.id }}/validation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contractVersion: \"1\", workflowExecutionId: $json.workflowExecutionId, workflowName: \"02-validation\", status: \"DISQUALIFIED\", errorMessage: $json.reason }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Dedupe Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [660, -60],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/crm/service/leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "queryParameters": {
+          "parameters": [
+            { "name": "email", "value": "={{ $json.lead.email }}" }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Check Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -60],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The dedupe lookup always finds THIS lead itself (it was already\n// persisted by EYAN before the webhook fired) — a genuine duplicate is a\n// DIFFERENT lead row with the same email, not a self-match.\nconst current = $('Validate Payload').item.json;\nconst existing = $json.data && $json.data.lead ? $json.data.lead : null;\nconst isDuplicate = !!existing && existing.id !== current.lead.id;\n\nreturn [{\n  json: {\n    isDuplicate,\n    lead: current.lead,\n    workflowExecutionId: current.workflowExecutionId,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1100, -60],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isDuplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Mark Disqualified - Duplicate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1320, 60],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/crm/service/leads/{{ $json.lead.id }}/validation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contractVersion: \"1\", workflowExecutionId: $json.workflowExecutionId, workflowName: \"02-validation\", status: \"DISQUALIFIED\", errorMessage: \"Duplicate lead (an existing lead was already found for this email).\" }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Mark Validated",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1320, -120],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/crm/service/leads/{{ $json.lead.id }}/validation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contractVersion: \"1\", workflowExecutionId: $json.workflowExecutionId, workflowName: \"02-validation\", status: \"VALIDATED\" }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Build Workflow 3 Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, -120],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Sprint 3 (ADR-0020, eyan-ai-platform) — hands off to the real AI\n// Qualification workflow, replacing Sprint 2's dummy/stub payload. Same\n// { lead, workflowExecutionId } shape Workflow 1 already passes to this\n// workflow, forwarded unchanged.\nconst lead = $('Check Duplicate').item.json.lead;\nconst workflowExecutionId = $('Check Duplicate').item.json.workflowExecutionId;\n\nreturn [{ json: { lead, workflowExecutionId } }];\n"
+      }
+    },
+    {
+      "id": "n11",
+      "name": "Call Workflow 3 - AI Qualification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1760, -120],
+      "parameters": {
+        "workflowId": "CrmAiQualificationWf01"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [[{ "node": "Validate Payload", "type": "main", "index": 0 }]]
+    },
+    "Validate Payload": {
+      "main": [[{ "node": "Payload Valid?", "type": "main", "index": 0 }]]
+    },
+    "Payload Valid?": {
+      "main": [
+        [{ "node": "Dedupe Check", "type": "main", "index": 0 }],
+        [{ "node": "Mark Disqualified - Invalid Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Dedupe Check": {
+      "main": [[{ "node": "Check Duplicate", "type": "main", "index": 0 }]]
+    },
+    "Check Duplicate": {
+      "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Mark Disqualified - Duplicate", "type": "main", "index": 0 }],
+        [{ "node": "Mark Validated", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Validated": {
+      "main": [[{ "node": "Build Workflow 3 Input", "type": "main", "index": 0 }]]
+    },
+    "Build Workflow 3 Input": {
+      "main": [[{ "node": "Call Workflow 3 - AI Qualification", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,175 @@
+{
+  "id": "CrmLeadIntakeWf01",
+  "name": "CRM - 01 - Lead Intake",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Webhook - Lead Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "crm-lead-intake-01",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "crm/lead-intake",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Prepare Verification Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ADR-0019 Decision 1 / ADR-0006 — signature is HMAC-SHA256 over\n// `${timestamp}.${rawBody}`, using the EXACT bytes EYAN sent (not a\n// re-serialization of the parsed JSON), captured via the Webhook node's\n// \"Raw Body\" option as base64 in binary.data.data.\nconst item = $input.item;\nconst headers = item.json.headers || {};\nconst signatureHeader = String(headers['x-eyan-signature'] || '');\nconst timestampHeader = String(headers['x-eyan-timestamp'] || '');\n\nconst receivedSignature = signatureHeader.startsWith('sha256=')\n  ? signatureHeader.slice(7)\n  : signatureHeader;\n\nconst timestampMs = Number(timestampHeader);\nconst rawBody = item.binary && item.binary.data\n  ? Buffer.from(item.binary.data.data, 'base64').toString('utf8')\n  : '';\n\n// 5-minute replay window — matches ADR-0019 Decision 1 / TDD §17.\nconst FRESHNESS_WINDOW_MS = 5 * 60 * 1000;\nconst isFresh = Number.isFinite(timestampMs) && Math.abs(Date.now() - timestampMs) <= FRESHNESS_WINDOW_MS;\n\nreturn [{\n  json: {\n    hasSignature: signatureHeader.length > 0,\n    receivedSignature,\n    isFresh,\n    rawBody,\n    signedString: `${timestampHeader}.${rawBody}`,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Compute Expected Signature",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "value": "={{ $json.signedString }}",
+        "type": "SHA256",
+        "dataPropertyName": "computedSignature",
+        "encoding": "hex"
+      },
+      "credentials": {
+        "crypto": {
+          "id": "WhSigSecretCred01",
+          "name": "EYAN Webhook Signing Secret"
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Verify & Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// A plain string comparison (not crypto.timingSafeEqual) is a deliberate,\n// documented simplification here — see docs/adrs/ADR-0006-crm-workflow-authentication.md\n// for why this threat model differs from EYAN's own authenticateService\n// comparison, and why n8n's Code node sandbox has no network/require access\n// this workflow needs anyway (HMAC computation itself uses the native\n// Crypto node + an encrypted credential, never $env or require('crypto')).\nconst prep = $('Prepare Verification Input').item.json;\nconst computed = $json.computedSignature;\n\nif (!prep.hasSignature || computed !== prep.receivedSignature) {\n  return [{ json: { valid: false, reason: 'Invalid signature.' } }];\n}\n\nif (!prep.isFresh) {\n  return [{ json: { valid: false, reason: 'Stale timestamp (outside the 5 minute freshness window).' } }];\n}\n\nlet payload;\ntry {\n  payload = JSON.parse(prep.rawBody);\n} catch (error) {\n  return [{ json: { valid: false, reason: 'Malformed JSON body.' } }];\n}\n\nif (!payload || !payload.lead || !payload.lead.id) {\n  return [{ json: { valid: false, reason: 'Missing lead payload.' } }];\n}\n\nreturn [{ json: { valid: true, lead: payload.lead, contractVersion: payload.contractVersion } }];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [880, 0],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [1100, -120],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true } }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Build Sub-Workflow Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -120],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// $execution.id is n8n's own execution ID — reused as the ADR-0019\n// idempotency key (workflowExecutionId) rather than minting a separate UUID,\n// keeping this traceable directly in the n8n UI.\nreturn [{ json: { lead: $json.lead, workflowExecutionId: $execution.id } }];\n"
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Call Workflow 2 - Validation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1540, -120],
+      "parameters": {
+        "workflowId": "CrmValidationWf01"
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Respond 401 Invalid Signature",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [1100, 120],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: false, message: $json.reason } }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook - Lead Intake": {
+      "main": [[{ "node": "Prepare Verification Input", "type": "main", "index": 0 }]]
+    },
+    "Prepare Verification Input": {
+      "main": [[{ "node": "Compute Expected Signature", "type": "main", "index": 0 }]]
+    },
+    "Compute Expected Signature": {
+      "main": [[{ "node": "Verify & Parse", "type": "main", "index": 0 }]]
+    },
+    "Verify & Parse": {
+      "main": [[{ "node": "Signature Valid?", "type": "main", "index": 0 }]]
+    },
+    "Signature Valid?": {
+      "main": [
+        [{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }],
+        [{ "node": "Respond 401 Invalid Signature", "type": "main", "index": 0 }]
+      ]
+    },
+    "Respond 202 Accepted": {
+      "main": [[{ "node": "Build Sub-Workflow Input", "type": "main", "index": 0 }]]
+    },
+    "Build Sub-Workflow Input": {
+      "main": [[{ "node": "Call Workflow 2 - Validation", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

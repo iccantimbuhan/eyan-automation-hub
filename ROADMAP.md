@@ -85,6 +85,8 @@ Deliverables:
 
 # Phase 4 — Workflow Framework
 
+Status: Started 2026-07-31 (CRM domain — see ADR-0005, ADR-0006, ADR-0007)
+
 Objectives:
 
 - Workflow standards
@@ -100,6 +102,8 @@ Deliverables:
 ---
 
 # Phase 5 — Portfolio Workflows
+
+Status: Started 2026-07-31 — Lead Qualification Automation. Milestone 1 (Lead Intake + Validation) and Milestone 2 (real AI Qualification via Ollama, `eyan-ai-platform` ADR-0020) both complete — see ADR-0007 for the one open item (n8n-to-Ollama connectivity). Milestone 3 (notifications, Workflow 5) not started.
 
 Target flagship workflows include:
 
