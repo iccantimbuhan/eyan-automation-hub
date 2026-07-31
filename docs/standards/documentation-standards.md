@@ -1,10 +1,17 @@
 # Documentation Standards
 
-## Purpose
+Version: 1.0
+Status: Approved
 
-Documentation is treated as a first-class deliverable.
+---
 
-Every significant feature, workflow, deployment change, or architectural decision must be documented before or alongside implementation.
+# Purpose
+
+Documentation is a core deliverable of EYAN Automation Hub.
+
+Every significant architectural decision, workflow, deployment change, and operational procedure should be documented alongside implementation.
+
+The objective is to ensure long-term maintainability, reproducibility, and knowledge sharing.
 
 ---
 
@@ -12,18 +19,20 @@ Every significant feature, workflow, deployment change, or architectural decisio
 
 Documentation should be:
 
-- Clear
 - Accurate
-- Versioned
-- Maintainable
-- Reproducible
+- Current
+- Clear
+- Consistent
+- Version controlled
 - Easy to navigate
+
+Documentation should explain both *what* was built and *why* it exists.
 
 ---
 
 # Required Documentation
 
-Every major feature should include:
+Every major feature or workflow should include:
 
 - Business Problem
 - Business Value
@@ -32,39 +41,69 @@ Every major feature should include:
 - Configuration
 - Dependencies
 - Security Considerations
-- Monitoring
 - Error Handling
+- Monitoring
 - Recovery Procedure
 - Lessons Learned
 
 ---
 
-# Writing Style
+# Workflow Documentation
 
-Documentation should:
+Every production workflow should include:
 
-- Use Markdown
-- Use clear headings
-- Avoid unnecessary complexity
-- Include diagrams where appropriate
-- Prefer explanations over assumptions
+- Workflow Name
+- Category
+- Trigger
+- Inputs
+- Outputs
+- External Services
+- AI Provider (if applicable)
+- Workflow Diagram
+- Node Explanation
+- Sample Data
+- Portfolio Screenshots
+- Demo Video Plan
 
 ---
 
-# Version Control
+# Architecture Documentation
 
-Documentation should evolve with the project.
+Architecture documents should:
 
-Major architectural changes must reference an ADR.
+- Describe system intent
+- Avoid implementation details
+- Reference related ADRs
+- Remain technology-neutral where practical
+
+---
+
+# ADR Requirements
+
+Create an ADR when:
+
+- Repository structure changes
+- Deployment architecture changes
+- Security model changes
+- Monitoring strategy changes
+- Workflow governance changes
 
 ---
 
 # Review Checklist
 
-Before merging changes, verify:
+Before completing a feature, verify:
 
 - Documentation is updated
-- Architecture diagrams remain accurate
-- Deployment instructions are current
+- Architecture remains accurate
 - Security implications are documented
-- ADRs are created when architectural decisions change
+- Operational procedures are current
+- Related ADRs have been created if needed
+
+---
+
+# Related Documents
+
+- System Overview
+- Workflow Architecture
+- Repository Structure
