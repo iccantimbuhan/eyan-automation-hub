@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+
+networks:
+  automation-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  n8n-data:
+  redis-data:
