@@ -181,10 +181,11 @@
       "parameters": {
         "method": "POST",
         "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "authentication": "none",
         "sendBody": true,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ text: `:dart: Lead qualified: *${$json.lead.contactName}*${$json.lead.company ? ' (' + $json.lead.company + ')' : ''} -- score ${$json.qualification.score}, ${$json.qualification.confidenceTier || 'unknown'} confidence, routed to *${$json.pipelineStage}*.\\nRecommended: ${$json.qualification.recommendedAction}` }) }}",
+        "jsonBody": "={{ JSON.stringify({ text: ':dart: Lead qualified: *' + $('Verify & Parse').item.json.lead.contactName + '*' + ($('Verify & Parse').item.json.lead.company ? ' (' + $('Verify & Parse').item.json.lead.company + ')' : '') + ' -- score ' + $('Verify & Parse').item.json.qualification.score + ', ' + ($('Verify & Parse').item.json.qualification.confidenceTier || 'unknown') + ' confidence, routed to *' + $('Verify & Parse').item.json.pipelineStage + '*.\\nRecommended: ' + $('Verify & Parse').item.json.qualification.recommendedAction }) }}",
         "options": { "timeout": 10000 }
       }
     },
@@ -218,8 +219,8 @@
       "parameters": {
         "fromEmail": "={{ $env.SALES_NOTIFICATION_EMAIL_FROM || 'sales-automation@eyan.fyi' }}",
         "toEmail": "={{ $env.SALES_NOTIFICATION_EMAIL_TO }}",
-        "subject": "={{ `Lead qualified: ${$json.lead.contactName}${$json.lead.company ? ' (' + $json.lead.company + ')' : ''}` }}",
-        "text": "={{ `Score: ${$json.qualification.score}\\nConfidence: ${$json.qualification.confidenceTier || 'unknown'}\\nPipeline stage: ${$json.pipelineStage}\\nRecommended action: ${$json.qualification.recommendedAction}\\n\\nSummary: ${$json.qualification.summary}` }}",
+        "subject": "={{ 'Lead qualified: ' + $('Verify & Parse').item.json.lead.contactName + ($('Verify & Parse').item.json.lead.company ? ' (' + $('Verify & Parse').item.json.lead.company + ')' : '') }}",
+        "text": "={{ 'Score: ' + $('Verify & Parse').item.json.qualification.score + '\\nConfidence: ' + ($('Verify & Parse').item.json.qualification.confidenceTier || 'unknown') + '\\nPipeline stage: ' + $('Verify & Parse').item.json.pipelineStage + '\\nRecommended action: ' + $('Verify & Parse').item.json.qualification.recommendedAction + '\\n\\nSummary: ' + $('Verify & Parse').item.json.qualification.summary }}",
         "options": {}
       },
       "credentials": {
