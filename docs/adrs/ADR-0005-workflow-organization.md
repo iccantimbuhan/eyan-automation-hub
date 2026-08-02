@@ -44,7 +44,7 @@
 - `docs/adrs/ADR-0002-repository-architecture.md`
 - `ADR-0006-crm-workflow-authentication.md` (this sprint's domain-specific follow-up)
 - `templates/workflow/workflow-template.md`
-- `docs/workflows/01-lead-intake.md`, `docs/workflows/02-validation.md`
+- `docs/workflows/01-lead-intake.md`, `docs/workflows/02-validation.md`, `docs/workflows/03-ai-qualification.md`, `docs/workflows/04-sales-automation.md`
 
 # Notes
 

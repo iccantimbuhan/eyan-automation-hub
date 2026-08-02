@@ -103,7 +103,7 @@ Deliverables:
 
 # Phase 5 — Portfolio Workflows
 
-Status: Started 2026-07-31 — Lead Qualification Automation. Milestone 1 (Lead Intake + Validation) and Milestone 2 (real AI Qualification via Ollama, `eyan-ai-platform` ADR-0020) both complete — see ADR-0007 for the one open item (n8n-to-Ollama connectivity). Milestone 3 (notifications, Workflow 5) not started.
+Status: Started 2026-07-31 — Lead Qualification Automation. Milestone 1 (Lead Intake + Validation) complete. Milestone 2 (AI Qualification) revised 2026-08-02 (Sprint 5): Workflow 3 no longer calls Ollama directly — it now calls `eyan-ai-platform`'s AI Core `lead-qualification` Capability, which owns provider selection/prompt versioning/retries itself (see `eyan-ai-platform` ADR-0021, superseding the provider-in-this-repo parts of ADR-0020). Milestone 3 (notifications) partially complete: Workflow 4 (assign salesperson, Slack, email) built and logic-tested; Slack/email not live-verified (no real credentials this session) — see `docs/workflows/04-sales-automation.md`.
 
 Target flagship workflows include:
 

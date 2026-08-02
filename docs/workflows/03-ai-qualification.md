@@ -1,18 +1,18 @@
 # CRM - 03 - AI Qualification
 
-Status: Active (imported, inactive by default — see Testing). Real Ollama connectivity resolved — see Security and ADR-0007.
+Status: Active (imported, inactive by default — see Testing). Sprint 5: re-pointed at `eyan-ai-platform`'s AI Core instead of calling Ollama directly.
 
 Category: CRM
 
 Owner: Automation Hub
 
-Version: 1.0
+Version: 2.0
 
 ---
 
 # Purpose
 
-Replaces Sprint 2's dummy/stub qualification payload with a real, provider-agnostic AI qualification step (`eyan-ai-platform` ADR-0020): loads a versioned prompt, calls the configured AI provider, validates the response against the frozen JSON schema, retries on failure, applies the three-tier confidence policy, and writes the result back to EYAN through the exact same contract Sprint 2 already proved. Only Ollama is implemented this sprint; the architecture (config-driven provider selection, a single schema-validation gate every provider branch converges on) supports adding OpenAI/Claude/Gemini later without a redesign.
+Sprint 3 built a real, provider-agnostic AI qualification step that called Ollama directly from this workflow. Sprint 5's brief made that a rule violation ("do not bypass AI Core, do not call providers directly") — `eyan-ai-platform` had, in parallel, built a `lead-qualification` AI Core Capability (Brain, versioned prompt, routing policy, confidence-tier computation) that nothing actually called yet. This version re-points the workflow at that Capability over HTTP instead: n8n no longer selects a provider, loads a prompt file, or runs its own retry loop — AI Core's `AiRoutingService` already does all of that (brain/routing-policy resolution, up to 3 retries, HIGH/MEDIUM/LOW confidence-tier computation from the model's own numeric confidence). This workflow's job shrinks to: call the Capability, map its response onto the CRM's qualification write-back contract, and hand off to `Submit Qualification` — same downstream contract Sprint 2/3 already proved, unchanged.
 
 ---
 
@@ -34,94 +34,71 @@ Replaces Sprint 2's dummy/stub qualification payload with a real, provider-agnos
 # Workflow Steps
 
 1. **When Called by Another Workflow** (Execute Workflow Trigger) — receives `{ lead, workflowExecutionId }`.
-2. **Load Config** (Code) — reads every provider/prompt/retry/confidence/timeout setting from `$env`, with defaults (ADR-0020: nothing here is hardcoded). `AI_PROVIDER` is the one value an operator changes to swap providers.
-3. **Select Provider** (Switch, config-driven on `provider`) — routes to the `ollama` branch, or a fallback ("Unsupported Provider") for any other value.
-   - **Unsupported Provider** → **Build Unsupported Provider Payload** (Code) — a real, deliberate definitive-failure outcome (not a fake implementation of the missing provider) → **Submit Qualification**, `needsManualReview: true`.
-4. **Load Prompt Template** (Read/Write Files From Disk, read) — loads `lead-qualification.{promptVersion}.md` from the read-only mounted `workflows/crm/prompts/` (ADR-0020 Decision 2: prompts are never embedded in a node).
-5. **Build Initial Prompt** (Code) — parameterizes the template with the lead's fields.
-6. **Prepare Attempt** (Code) — a stable re-entry point for the retry loop; both the first attempt and every retry flow through here so downstream nodes have one consistent place to read "the state used for this attempt" from.
-7. **Call Ollama** (HTTP Request, `onError: continueRegularOutput`) — `POST {OLLAMA_BASE_URL}/api/chat`, matching `eyan-ai-platform`'s own `OllamaProvider` request shape. Failures are captured as data, not a stopped workflow.
-8. **Classify Ollama Result** (Code) — parses the model's response (tolerating markdown fences / surrounding prose despite prompt instructions), validates it against the full AI JSON schema (ADR-0020 Decision 3), and classifies the outcome: `valid`, `schema_invalid`, `transient` (timeout/5xx/connection error), or `definitive` (400/401/403/404 — the provider itself rejected the request).
-9. **Outcome Router** (Switch) — branches on the classification:
-   - **valid** → **Compute Confidence and Route** (Code) — three-tier policy (ADR-0020 Decision 6): High (≥0.75) automated; Medium (0.4–0.75) automated with the `recommendedAction` annotated `[AI-assisted, review recommended]`; Low (<0.4) → `needsManualReview: true`. → **Submit Qualification**.
-   - **retryable** (`schema_invalid` or `transient`) → **Check Retry Budget** (IF: `retryCount < maxRetries`).
-     - **true** → **Prepare Retry** (Code) — increments `retryCount`; for `schema_invalid`, appends the model's own bad output plus the specific validation error to the prompt (ADR-0020 Decision 5's corrective-retry shape) → loops back to **Prepare Attempt**.
-     - **false** (retries exhausted) → **Build Manual Review Payload**.
-   - **definitive** → **Build Manual Review Payload** directly, no retry (ADR-0020 Decision 8, class 3).
-   - **Unexpected** (defensive fallback) → **Build Manual Review Payload**.
-10. **Build Manual Review Payload** (Code) — every non-`valid` terminal outcome writes back through the same contract, `needsManualReview: true`, `errorMessage` describing exactly what failed → **Submit Qualification**.
-11. **Submit Qualification** (`PATCH /crm/service/leads/:id/qualification`) — the same endpoint and payload shape Sprint 2's dummy payload already exercised; Sprint 3 changes what produces the payload, never the contract receiving it.
+2. **Load Config** (Code) — no longer resolves provider/prompt/threshold config (AI Core owns all of that now); just carries `lead`/`workflowExecutionId` forward and records `startedAt` for duration tracking.
+3. **Call AI Core** (HTTP Request, `onError: continueRegularOutput`) — `POST {EYAN_API_BASE_URL}/ai-core/service/capabilities/lead-qualification/invoke`, authenticated via the same "EYAN Service API" credential `Submit Qualification` already used (ADR-0006 — no new credential). Body: `{ input: { contactName, email, phone, company, industry, companySize, source, createdAt }, context: { expectJson: true, workflowName, workflowExecutionId } }`. A 300s timeout matches AI Core's own routing-policy timeout. Failures are captured as data (`$json.error`), not a stopped workflow — same resilience posture the old `Call Ollama` node had.
+4. **Map AI Core Result** (Code) — replaces the old Select Provider / Load Prompt Template / Build Initial Prompt / Prepare Attempt / Call Ollama / Classify Ollama Result / Outcome Router / Check Retry Budget / Prepare Retry chain in full:
+   - `outcome: "VALID"` with a parsed `outputJson` → flattens the AI's fields (`leadScore` rounded, `budgetEstimate` split into `budgetEstimateMin/Max/Currency`, etc.) into the qualification payload, carries `confidence` (AI Core's own HIGH/MEDIUM/LOW tier — a **new** field, `confidenceTier`, driving EYAN's Phase 4 pipeline auto-routing) and `needsManualReview` straight through from AI Core's response rather than recomputing them. `MEDIUM` tier gets the same `[AI-assisted, review recommended]` annotation on `recommendedAction` as before.
+   - Any other outcome (`SCHEMA_INVALID`, `TRANSIENT_FAILURE`, `DEFINITIVE_FAILURE` — AI Core already exhausted its own retries by the time it returns one of these) or an HTTP-level failure reaching AI Core at all → a manual-review payload (`needsManualReview: true`, `leadScore`/`confidence` 0, no `confidenceTier` so EYAN leaves the lead at `AI_ANALYZED` rather than auto-routing on data it doesn't trust) — same "never strand a lead" guarantee as Sprint 3, just with a single unified failure branch instead of three classified ones (the classification/retry work now happens once, inside AI Core, not duplicated here).
+5. **Submit Qualification** (`PATCH /crm/service/leads/:id/qualification`) — same endpoint, same credential, unchanged. The one new field in the body, `confidenceTier`, is additive — EYAN's validator accepts it optionally.
 
 ---
 
 # Integrations
 
-- **Ollama** — `POST {OLLAMA_BASE_URL}/api/chat`, no n8n credential (ADR-0020 Decision 1 — a local network call, not a hosted API needing a key). Reachable via `http://host.docker.internal:11434` (`docker-compose.yml`'s `extra_hosts: host.docker.internal:host-gateway` on the `n8n` service) — see ADR-0007.
-- **EYAN AI Platform** (`eyan-ai-platform`) — `Submit Qualification` calls `/api/v1/crm/service/*`, authenticated via the "EYAN Service API" credential (ADR-0006), identical to Workflows 1/2.
+- **EYAN AI Platform — AI Core** (`eyan-ai-platform`) — `Call AI Core` hits `/api/v1/ai-core/service/capabilities/lead-qualification/invoke`, authenticated via the "EYAN Service API" credential (same one, reused — ADR-0006). This route is new (Sprint 5); it mirrors `/crm/service/*`'s auth pattern exactly, added as a separate route group rather than folding into the human-JWT `/ai-core/capabilities/*` surface (that architecture is frozen per `eyan-ai-platform`'s ADR-0021).
+- **EYAN AI Platform — CRM** (`eyan-ai-platform`) — `Submit Qualification` calls `/api/v1/crm/service/*`, unchanged from Sprint 3.
+- Ollama is no longer called from this repo at all — it's now exclusively AI Core's concern, one hop away, inside `eyan-ai-platform`.
 
 ---
 
 # Outputs
 
-- The lead's EYAN-side status moves to `AI_ANALYZED`, with a real (or, on failure, manual-review-flagged) score/priority/confidence and the full AI analysis persisted in `LeadAiAnalysis`.
-- A `WorkflowExecutionLog` row (`workflowName: "03-ai-qualification"`) and a `LeadActivity` row (`type: AI_ANALYSIS`), same as Sprint 2's dummy payload produced.
+- The lead's EYAN-side status moves to `AI_ANALYZED`, then (Sprint 5, EYAN-side) auto-routes to `QUALIFIED` (HIGH confidence) or `DISQUALIFIED` (LOW confidence) — `MEDIUM`/missing tier stays at `AI_ANALYZED` as the review bucket. Score/priority/confidence and the full AI analysis persist in `LeadAiAnalysis`; `rawResponse` on that row now also contains AI Core's routing metadata (brain, outcome, retryCount, latencyMs) verbatim.
+- A `WorkflowExecutionLog` row (`workflowName: "03-ai-qualification"`), an `AI_ANALYSIS` `LeadActivity`, a `STATUS_CHANGE` activity for the pipeline move (if any), and an `AUTOMATION` activity recording the recommended next action — all EYAN-side (Sprint 5 additions), not new work in this workflow.
+- An `AiUsageLog` row on the AI Core side, written automatically by `AiRoutingService` the moment `Call AI Core` runs — this workflow gets full AI-invocation audit trail for free, without emitting anything extra itself.
 
 ---
 
 # Error Handling
 
-Three failure classes (ADR-0020 Decision 8), each with a distinct, real outcome — never a silent drop, never a stuck lead:
+AI Core now owns retry/backoff and failure classification internally (its `AiRoutingPolicy`, `maxRetries: 3`) — this workflow only distinguishes two cases:
 
-1. **Schema-invalid** (malformed JSON, missing/invalid field) — retried up to `AI_MAX_RETRIES` with corrective feedback, then `needsManualReview: true`.
-2. **Transient** (timeout, 5xx, connection error) — retried up to `AI_MAX_RETRIES` with the same prompt, then `needsManualReview: true`.
-3. **Definitive** (400/401/403/404) — no retry, immediate `needsManualReview: true` with the provider's own rejection reason in `errorMessage`.
+1. **AI Core returned a non-VALID outcome** (it already retried internally and gave up) — `Map AI Core Result` builds a manual-review payload with the outcome in `errorMessage`.
+2. **The HTTP call to AI Core itself failed** (network error, AI Core unreachable) — same manual-review payload, `errorMessage` prefixed `[request_failed]`.
 
-An unsupported `AI_PROVIDER` value is its own real, non-AI-call outcome (`needsManualReview: true`, clear `errorMessage`) — not an error the workflow crashes on.
+Both still submit through the same `Submit Qualification` contract — a lead is never stranded at `VALIDATED`.
 
 ---
 
 # Security
 
-Authentication: outbound calls to EYAN use the "EYAN Service API" credential (ADR-0006), same as Workflows 1/2. Ollama needs no credential (ADR-0020 Decision 1).
+Authentication: outbound calls to EYAN (both `Call AI Core` and `Submit Qualification`) use the "EYAN Service API" credential (ADR-0006) — the same credential, reused across both, per ADR-0006's "any future domain reusing `AUTOMATION_SERVICE_API_KEY` should reuse the same credential" guidance.
 
-Authorization: EYAN's `authenticateService` middleware is the actual authority; this workflow has no authorization logic of its own.
+Authorization: EYAN's `authenticateService` middleware is the actual authority for both routes; this workflow has no authorization logic of its own.
 
-Secrets Used: `AUTOMATION_SERVICE_API_KEY` via credential. `EYAN_API_BASE_URL`, `OLLAMA_BASE_URL`, `AI_PROVIDER`, and every retry/confidence/timeout value are plain config via `$env` — none are secrets (Ollama needs no credential; there is nothing to protect).
+Secrets Used: `AUTOMATION_SERVICE_API_KEY` via credential. `EYAN_API_BASE_URL` is plain config via `$env` (not a secret). No Ollama-specific config (`OLLAMA_BASE_URL`, `AI_PROVIDER`, etc.) is read from this workflow anymore — that's entirely AI Core's concern now, inside `eyan-ai-platform`.
 
-Sensitive Data: lead contact fields and the model's full analysis (including `reasoning`) pass through this workflow — visible in n8n's execution history and in `LeadAiAnalysis.rawResponse`, not forwarded anywhere beyond EYAN.
-
-**Resolved connectivity, one open note**: `eyan-n8n` now reaches Ollama via `host.docker.internal` (ADR-0007). Ollama now listens on all interfaces (`0.0.0.0:11434`, previously loopback-only) — `ufw` was confirmed disabled earlier this same session, so whether Ollama's API is restricted to the Docker bridge or reachable from the public internet depends on host-level configuration outside both repos' scope. Flagged in ADR-0007's Consequences for whoever owns host infrastructure, not fixed here.
+Sensitive Data: lead contact fields pass through this workflow as before; the model's full analysis (including `reasoning`) is no longer visible in this workflow's own execution history in as much detail as before (it arrives already-summarized in AI Core's response) but is still fully captured in `LeadAiAnalysis.rawResponse` on the EYAN side.
 
 ---
 
 # Monitoring
 
-Success Metrics: n8n's execution list; `WorkflowExecutionLog`/`LeadAiAnalysis` on the EYAN side (`provider`, `model`, `confidence`, `needsManualReview` per row).
+Success Metrics: n8n's execution list; `WorkflowExecutionLog`/`LeadAiAnalysis` on the EYAN side, plus (new, Sprint 5) `AiUsageLog` for per-invocation AI Core telemetry (outcome, retryCount, latencyMs).
 
-Failure Alerts: not configured this sprint (Workflow 5 / notifications, per the TDD, not built).
+Failure Alerts: not configured (Workflow 5 / notifications — still not built; see `04-sales-automation.md` for the narrower notification scope that *was* built this sprint).
 
-Logging: n8n's own execution log; `LeadAiAnalysis.rawResponse` is the full audit trail per analysis attempt.
+Logging: n8n's own execution log; `LeadAiAnalysis.rawResponse` remains the full audit trail per analysis attempt, now inclusive of AI Core's own routing metadata.
 
 ---
 
 # Testing
 
-Two rounds: an initial mock-based round (while Ollama connectivity was blocked, ADR-0007) and a follow-up round against the real Ollama service once connectivity was resolved. Both rounds run live against the real n8n execution engine (`n8n execute`, via a temporarily-injected trigger-input node — the same CLI-limitation workaround as Workflows 1/2, since Execute Workflow Trigger nodes don't accept CLI-supplied input directly) and a real, temporary EYAN backend instance. Every result below is confirmed via the resulting `LeadAiAnalysis`/`Lead` rows in the database, not just n8n's own execution log.
+**Live, end-to-end against real infrastructure** (this session): a real lead was created via `POST /crm/leads`, manually validated via `PATCH /crm/service/leads/:id/validation` (simulating Workflow 2's write-back), then `Call AI Core`'s exact HTTP request was replayed by hand against the running `eyan-ai-platform` backend (real Postgres, real Ollama `qwen2.5-coder:7b`) — a real `VALID` outcome came back (`leadScore: 30, confidence: 0.3, tier: LOW, needsManualReview: true`, `latencyMs: 205382`). The resulting payload was then submitted to `Submit Qualification` exactly as `Map AI Core Result` would build it, and confirmed end-to-end in the database: `LeadAiAnalysis` row written correctly; lead auto-routed `NEW → VALIDATED → AI_ANALYZED → DISQUALIFIED` (LOW tier, Phase 4); `LeadActivity` rows for `AI_ANALYSIS`, the pipeline `STATUS_CHANGE`, and the recommended-action `AUTOMATION` activity all present and correctly worded; `WorkflowExecutionLog` rows for both write-backs; an `AiUsageLog` row written automatically with the correct `capabilityId`/`outcome`/`latencyMs`. Test lead and its rows were deleted after verification.
 
-**Round 1 — mocked Ollama** (a plain Node HTTP server shaped like Ollama's `/api/chat` response, bound to the Docker bridge gateway IP): 7 scenarios, all correct — happy path (HIGH confidence 0.91, score 82, priority HIGH); schema-invalid then valid on retry (confirms the retry loop's back-edge — `Prepare Retry` → `Prepare Attempt` → `Call Ollama` — actually re-executes in n8n's real engine, not just in isolated logic); transient failure exhausting all retries (a real `ECONNREFUSED` encountered incidentally when the mock was briefly down between runs); medium confidence (0.55, `recommendedAction` annotated `[AI-assisted, review recommended]`); low confidence (0.2, `needsManualReview: true`); definitive failure (mock returns HTTP 400, zero retries, confirmed via the mock's request log showing exactly one call); unsupported provider (`AI_PROVIDER=claude`, zero calls reached the mock).
+**Algorithm-level, against the actual committed code**: `tests/workflows/crm/03-ai-qualification.logic.test.js` was rewritten for the new `Map AI Core Result` node (the old file tested the now-deleted `Classify Ollama Result`/`Compute Confidence and Route` nodes) — 25 assertions covering the VALID/HIGH/MEDIUM/LOW paths, `budgetEstimate` flattening (including the null case), every non-VALID AI Core outcome, and the network-failure path. Run: `node tests/workflows/crm/03-ai-qualification.logic.test.js`. All 25 pass.
 
-**Round 2 — real Ollama, once ADR-0007's connectivity fix (`host.docker.internal`) was confirmed reachable**:
-
-- **Real transient failure**: `OLLAMA_BASE_URL` temporarily pointed at a closed port on the same host — a genuine `ECONNREFUSED` through the real `host.docker.internal` → real Docker gateway (`172.17.0.1`) path, correctly classified `transient`, retried 3 times, then `needsManualReview: true`.
-- **Real definitive failure**: `OLLAMA_MODEL` temporarily set to a nonexistent model name against the real, reachable Ollama server — a genuine HTTP 404 (`"model 'nonexistent-model-xyz' not found"`), correctly classified `definitive`, zero retries, `needsManualReview: true`.
-- **Unsupported provider, rerun**: `AI_PROVIDER=gemini` — fallback fired correctly; zero real Ollama calls made.
-- **Happy path / schema validation / retry, against the real model** (three separate attempts, `qwen2.5-coder:7b`): every attempt reached the real Ollama server and received a real response, but the model consistently returned JSON shaped like a *different*, hallucinated CRM-record schema (`leadId`, `companyName`, `employeeCount`, `revenue`, `website`, ...) instead of the prompt's specified fields, still missing `recommendedAction`/`summary`/`reasoning` even after 3 corrective retries each time. All three attempts were correctly classified `schema_invalid`, correctly retried 3 times with the model's own bad output plus the specific validation error (ADR-0020 Decision 5), and correctly landed in `needsManualReview: true` on exhaustion — real, live confirmation of "never strand a lead" against a genuinely unreliable model, not a mock engineered to fail predictably. **Not achieved**: a genuinely valid real-model response to observe confidence-tier routing on live data — the routing logic itself (all three tiers, exact threshold boundaries) was already exhaustively proven in Round 1 (real n8n engine) and the algorithm tests below; this round additionally proves the schema-invalid/retry/manual-review path with a real model, which Round 1's mock could only simulate. Full raw model output and analysis: `docs/adrs/ADR-0007-n8n-ollama-connectivity-gap.md` (Resolution) and `docs/development-log/sprint-3-ai-qualification.md`.
-
-**Algorithm-level, against the actual committed code**: `tests/workflows/crm/03-ai-qualification.logic.test.js` extracts the real `jsCode` strings from `03-ai-qualification.json` (not a re-implementation) and runs them in a mocked n8n Code-node context — 27 assertions covering schema validation edge cases (markdown-fenced JSON, JSON embedded in prose, truncated JSON, every field's invalid-value case, `budgetEstimate` null/valid/malformed), error classification (every transient/definitive case from the live tests plus additional boundary cases), and confidence-tier boundaries (exactly at each threshold, just below each threshold, `leadScore` rounding, `budgetEstimate` flattening into the DTO's flat field shape). Run: `node tests/workflows/crm/03-ai-qualification.logic.test.js`. All 27 pass.
-
-**Not verified**: production webhook/workflow activation (same limitation as Workflows 1/2 — no interactive n8n UI/API-key access this session); confidence-tier routing observed against a genuinely valid real-model response (see above — the routing code itself is fully proven, just not yet exercised by a real model that satisfied the schema).
-
-All test leads, both temporary EYAN backend instances, the mock Ollama server, and every temporarily-injected test node were removed after verification; only the clean, final workflow JSON (real `OLLAMA_BASE_URL`, real `AI_PROVIDER=ollama`) is imported into the live instance.
+**Not verified this session**: production webhook/workflow activation via the n8n UI (no interactive n8n UI/API-key access this session, same limitation as prior sprints); a live execution *through the actual n8n engine* with these exact node changes (the equivalent Sprint 3 round-trip test) — the live verification above replayed the same HTTP calls by hand against the real backend rather than through n8n's executor, since this session had container/API access to the backend and Ollama but not an interactive n8n session. The workflow JSON itself was updated and is ready to import; a live n8n-engine execution round is recommended before flipping `active: true`.
 
 ---
 
@@ -129,6 +106,6 @@ All test leads, both temporary EYAN backend instances, the mock Ollama server, a
 
 Architecture: `eyan-ai-platform` `docs/ARCHITECTURE.md`
 
-ADR: `eyan-ai-platform` `.claude/decisions/ADR-0020-ai-provider-contract.md` (the contract this workflow implements), `docs/adrs/ADR-0005-workflow-organization.md`, `docs/adrs/ADR-0006-crm-workflow-authentication.md`, `docs/adrs/ADR-0007-n8n-ollama-connectivity-gap.md`
+ADR: `eyan-ai-platform` `.claude/decisions/ADR-0020-ai-provider-contract.md` (superseded in part by Sprint 5 — AI Core now owns what this ADR originally scoped to this workflow), `.claude/decisions/ADR-0021-ai-core-foundation.md` (the Capability/Brain/RoutingService architecture this workflow now depends on), `docs/adrs/ADR-0005-workflow-organization.md`, `docs/adrs/ADR-0006-crm-workflow-authentication.md`, `docs/adrs/ADR-0007-n8n-ollama-connectivity-gap.md` (no longer this repo's concern, but explains why AI Core's own Ollama connectivity works)
 
 Issue: n/a

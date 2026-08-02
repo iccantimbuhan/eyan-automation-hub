@@ -21,255 +21,46 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 1 — provider selection is config-driven, never\n// hardcoded. Every threshold/retry/timeout value here is also a config\n// value (Decisions 4-6), not a literal buried in node logic.\nconst lead = $json.lead || {};\nconst workflowExecutionId = $json.workflowExecutionId;\n\nfunction num(name, fallback) {\n  const raw = $env[name];\n  const n = Number(raw);\n  return raw !== undefined && raw !== '' && Number.isFinite(n) ? n : fallback;\n}\n\nreturn [{\n  json: {\n    lead,\n    workflowExecutionId,\n    provider: String($env.AI_PROVIDER || 'ollama').trim().toLowerCase(),\n    promptVersion: $env.AI_PROMPT_VERSION || 'v1',\n    maxRetries: num('AI_MAX_RETRIES', 3),\n    confidenceHigh: num('AI_CONFIDENCE_HIGH_THRESHOLD', 0.75),\n    confidenceMedium: num('AI_CONFIDENCE_MEDIUM_THRESHOLD', 0.4),\n    ollamaBaseUrl: $env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',\n    ollamaModel: $env.OLLAMA_MODEL || 'qwen2.5-coder:7b',\n    ollamaTimeoutMs: num('AI_OLLAMA_TIMEOUT_MS', 300000),\n    startedAt: Date.now(),\n  },\n}];\n"
+        "jsCode": "// Sprint 5 — AI Core now owns provider selection, prompt versioning, and\n// retries (AiRoutingPolicy), so this node no longer resolves any of that;\n// it just carries the lead through to the Call AI Core step.\nconst lead = $json.lead || {};\nconst workflowExecutionId = $json.workflowExecutionId;\n\nreturn [{\n  json: {\n    lead,\n    workflowExecutionId,\n    startedAt: Date.now(),\n  },\n}];\n"
       }
     },
     {
       "id": "n3",
-      "name": "Select Provider",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 3.2,
+      "name": "Call AI Core",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
       "position": [440, 0],
       "parameters": {
-        "mode": "rules",
-        "rules": {
-          "values": [
-            {
-              "outputKey": "ollama",
-              "conditions": {
-                "combinator": "and",
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.provider }}",
-                    "rightValue": "ollama",
-                    "operator": {
-                      "type": "string",
-                      "operation": "equals"
-                    }
-                  }
-                ],
-                "options": {
-                  "caseSensitive": false,
-                  "leftValue": "",
-                  "typeValidation": "strict",
-                  "version": 2
-                }
-              }
-            }
-          ]
-        },
+        "method": "POST",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/ai-core/service/capabilities/lead-qualification/invoke",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ input: { contactName: $json.lead.contactName, email: $json.lead.email, phone: $json.lead.phone, company: $json.lead.company, industry: $json.lead.industry, companySize: $json.lead.companySize, source: $json.lead.source, createdAt: $json.lead.createdAt }, context: { expectJson: true, workflowName: '03-ai-qualification', workflowExecutionId: $json.workflowExecutionId } }) }}",
         "options": {
-          "fallbackOutput": "extra",
-          "renameFallbackOutput": "Unsupported Provider"
+          "timeout": 300000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
         }
       }
     },
     {
       "id": "n4",
-      "name": "Load Prompt Template",
-      "type": "n8n-nodes-base.readWriteFile",
-      "typeVersion": 1,
-      "position": [660, -160],
-      "parameters": {
-        "operation": "read",
-        "fileSelector": "=/home/node/.n8n-files/prompts/lead-qualification.{{ $json.promptVersion }}.md",
-        "options": {}
-      }
-    },
-    {
-      "id": "n5",
-      "name": "Build Initial Prompt",
+      "name": "Map AI Core Result",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [880, -160],
+      "position": [660, 0],
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 2 — the prompt is never embedded in a node; it's read\n// from the versioned file (mounted read-only, see docker-compose.yml) and\n// parameterized here with the lead's own fields.\nconst config = $('Load Config').item.json;\nconst fileContent = Buffer.from($input.item.binary.data.data, 'base64').toString('utf8');\nconst lead = config.lead;\n\nfunction fill(template, vars) {\n  return template.replace(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g, (_, key) => {\n    const v = vars[key];\n    return (v === undefined || v === null || v === '') ? 'Unknown' : String(v);\n  });\n}\n\nconst promptText = fill(fileContent, {\n  contactName: lead.contactName,\n  email: lead.email,\n  phone: lead.phone,\n  company: lead.company,\n  industry: lead.industry,\n  companySize: lead.companySize,\n  source: lead.source,\n  createdAt: lead.createdAt,\n});\n\nreturn [{\n  json: {\n    promptText,\n    model: config.ollamaModel,\n    provider: config.provider,\n    promptVersion: config.promptVersion,\n    lead: config.lead,\n    workflowExecutionId: config.workflowExecutionId,\n    maxRetries: config.maxRetries,\n    confidenceHigh: config.confidenceHigh,\n    confidenceMedium: config.confidenceMedium,\n    ollamaBaseUrl: config.ollamaBaseUrl,\n    ollamaTimeoutMs: config.ollamaTimeoutMs,\n    retryCount: 0,\n    startedAt: config.startedAt,\n  },\n}];\n"
-      }
-    },
-    {
-      "id": "n6",
-      "name": "Prepare Attempt",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1100, -160],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// Stable re-entry point for the retry loop (ADR-0020 Decision 5) — both\n// the first attempt (from Build Initial Prompt) and every retry (from\n// Prepare Retry) flow through here, so downstream nodes can always read\n// \"the state used for this attempt\" via $('Prepare Attempt').item.json,\n// regardless of which upstream branch produced it.\nreturn [{ json: { ...$json } }];\n"
-      }
-    },
-    {
-      "id": "n7",
-      "name": "Call Ollama",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.5,
-      "onError": "continueRegularOutput",
-      "position": [1320, -160],
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $json.ollamaBaseUrl }}/api/chat",
-        "sendBody": true,
-        "contentType": "json",
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $json.model, messages: [{ role: 'system', content: 'You are a B2B sales lead qualification assistant. Return ONLY a single JSON object matching the required schema -- no prose, no markdown fences, no explanation outside the JSON.' }, { role: 'user', content: $json.promptText }], stream: false, options: { num_predict: 800 } }) }}",
-        "options": {
-          "timeout": "={{ $json.ollamaTimeoutMs }}"
-        }
-      }
-    },
-    {
-      "id": "n8",
-      "name": "Classify Ollama Result",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1540, -160],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 8 -- three failure classes, classified here:\n// schema-invalid (parses but fails validation, or isn't JSON at all),\n// transient (network/timeout/5xx -- retryable), definitive (4xx the\n// provider itself rejected -- not retryable). 'valid' is the happy path.\nconst attempt = $('Prepare Attempt').item.json;\nconst response = $json;\n\nfunction extractJson(text) {\n  if (typeof text !== 'string') return null;\n  let cleaned = text.trim();\n  cleaned = cleaned.replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/, '').trim();\n  try {\n    return JSON.parse(cleaned);\n  } catch (e) {\n    const match = cleaned.match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n      try { return JSON.parse(match[0]); } catch (e2) { return null; }\n    }\n    return null;\n  }\n}\n\nconst PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];\nconst LEVELS = ['LOW', 'MEDIUM', 'HIGH'];\nconst TIMELINES = ['IMMEDIATE', 'SHORT_TERM', 'MEDIUM_TERM', 'LONG_TERM', 'UNKNOWN'];\n\nfunction validateSchema(obj) {\n  if (!obj || typeof obj !== 'object') return 'Response is not a JSON object.';\n  if (typeof obj.leadScore !== 'number' || obj.leadScore < 0 || obj.leadScore > 100) return 'leadScore must be a number 0-100.';\n  if (typeof obj.confidence !== 'number' || obj.confidence < 0 || obj.confidence > 1) return 'confidence must be a number 0.0-1.0.';\n  if (!PRIORITIES.includes(obj.priority)) return `priority must be one of: ${PRIORITIES.join(', ')}.`;\n  if (obj.buyingIntent != null && !LEVELS.includes(obj.buyingIntent)) return 'buyingIntent invalid.';\n  if (obj.urgency != null && !LEVELS.includes(obj.urgency)) return 'urgency invalid.';\n  if (obj.riskLevel != null && !LEVELS.includes(obj.riskLevel)) return 'riskLevel invalid.';\n  if (obj.estimatedTimeline != null && !TIMELINES.includes(obj.estimatedTimeline)) return 'estimatedTimeline invalid.';\n  if (obj.decisionMakerIdentified != null && typeof obj.decisionMakerIdentified !== 'boolean') return 'decisionMakerIdentified must be boolean.';\n  if (obj.painPoints != null && !Array.isArray(obj.painPoints)) return 'painPoints must be an array.';\n  if (typeof obj.recommendedAction !== 'string' || !obj.recommendedAction.trim()) return 'recommendedAction is required.';\n  if (typeof obj.summary !== 'string' || !obj.summary.trim()) return 'summary is required.';\n  if (typeof obj.reasoning !== 'string' || !obj.reasoning.trim()) return 'reasoning is required.';\n  if (obj.budgetEstimate != null) {\n    const b = obj.budgetEstimate;\n    if (typeof b !== 'object' || typeof b.min !== 'number' || typeof b.max !== 'number' || typeof b.currency !== 'string') {\n      return 'budgetEstimate, if present, must be { min, max, currency }.';\n    }\n  }\n  return null;\n}\n\nlet outcome;\nlet reason = null;\nlet parsed = null;\n\nif (response && response.error) {\n  const message = String((response.error && response.error.message) || response.error || '');\n  const httpCodeMatch = message.match(/\\b(4\\d\\d)\\b/);\n  const httpCode = (response.error && response.error.httpCode) || (httpCodeMatch ? httpCodeMatch[1] : null);\n  const isDefinitive = httpCode && ['400', '401', '403', '404'].includes(String(httpCode));\n  outcome = isDefinitive ? 'definitive' : 'transient';\n  reason = message || 'AI provider call failed.';\n} else {\n  const content = response && response.message && response.message.content;\n  parsed = extractJson(content);\n  if (parsed === null) {\n    outcome = 'schema_invalid';\n    reason = 'Model response was not valid JSON.';\n  } else {\n    const validationError = validateSchema(parsed);\n    if (validationError) {\n      outcome = 'schema_invalid';\n      reason = validationError;\n    } else {\n      outcome = 'valid';\n    }\n  }\n}\n\nreturn [{\n  json: {\n    ...attempt,\n    outcome,\n    reason,\n    parsed,\n    rawModelOutput: (response && response.message) ? response.message.content : null,\n    latencyMs: Date.now() - attempt.startedAt,\n  },\n}];\n"
-      }
-    },
-    {
-      "id": "n9",
-      "name": "Outcome Router",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 3.2,
-      "position": [1760, -160],
-      "parameters": {
-        "mode": "rules",
-        "rules": {
-          "values": [
-            {
-              "outputKey": "valid",
-              "conditions": {
-                "combinator": "and",
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.outcome }}",
-                    "rightValue": "valid",
-                    "operator": { "type": "string", "operation": "equals" }
-                  }
-                ],
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
-              }
-            },
-            {
-              "outputKey": "retryable",
-              "conditions": {
-                "combinator": "or",
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.outcome }}",
-                    "rightValue": "schema_invalid",
-                    "operator": { "type": "string", "operation": "equals" }
-                  },
-                  {
-                    "leftValue": "={{ $json.outcome }}",
-                    "rightValue": "transient",
-                    "operator": { "type": "string", "operation": "equals" }
-                  }
-                ],
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
-              }
-            },
-            {
-              "outputKey": "definitive",
-              "conditions": {
-                "combinator": "and",
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.outcome }}",
-                    "rightValue": "definitive",
-                    "operator": { "type": "string", "operation": "equals" }
-                  }
-                ],
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
-              }
-            }
-          ]
-        },
-        "options": {
-          "fallbackOutput": "extra",
-          "renameFallbackOutput": "Unexpected"
-        }
-      }
-    },
-    {
-      "id": "n10",
-      "name": "Compute Confidence and Route",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1980, -320],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 6 -- three-tier confidence policy, thresholds are\n// config values (Load Config), never hardcoded here.\nconst item = $json;\nconst parsed = item.parsed;\nconst confidence = parsed.confidence;\n\nlet tier;\nif (confidence >= item.confidenceHigh) tier = 'HIGH';\nelse if (confidence >= item.confidenceMedium) tier = 'MEDIUM';\nelse tier = 'LOW';\n\nconst needsManualReview = tier === 'LOW';\nconst annotation = tier === 'MEDIUM' ? ' [AI-assisted, review recommended]' : '';\n\nconst budget = parsed.budgetEstimate || null;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: item.workflowExecutionId,\n    workflowName: '03-ai-qualification',\n    provider: item.provider,\n    model: item.model,\n    promptVersion: item.promptVersion,\n    leadScore: Math.round(parsed.leadScore),\n    confidence,\n    priority: parsed.priority,\n    industry: parsed.industry || undefined,\n    companySizeEstimate: parsed.companySizeEstimate || undefined,\n    budgetEstimateMin: budget ? budget.min : undefined,\n    budgetEstimateMax: budget ? budget.max : undefined,\n    budgetEstimateCurrency: budget ? budget.currency : undefined,\n    buyingIntent: parsed.buyingIntent || undefined,\n    urgency: parsed.urgency || undefined,\n    decisionMakerIdentified: parsed.decisionMakerIdentified,\n    estimatedTimeline: parsed.estimatedTimeline || undefined,\n    riskLevel: parsed.riskLevel || undefined,\n    painPoints: parsed.painPoints || [],\n    recommendedAction: `${parsed.recommendedAction}${annotation}`,\n    summary: parsed.summary,\n    reasoning: parsed.reasoning,\n    needsManualReview,\n    durationMs: item.latencyMs,\n    leadId: item.lead.id,\n  },\n}];\n"
-      }
-    },
-    {
-      "id": "n11",
-      "name": "Check Retry Budget",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.3,
-      "position": [1980, -160],
-      "parameters": {
-        "conditions": {
-          "combinator": "and",
-          "conditions": [
-            {
-              "leftValue": "={{ $json.retryCount }}",
-              "rightValue": "={{ $json.maxRetries }}",
-              "operator": {
-                "type": "number",
-                "operation": "lt"
-              }
-            }
-          ],
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 2
-          }
-        }
-      }
-    },
-    {
-      "id": "n12",
-      "name": "Prepare Retry",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2200, -220],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 5 -- a schema-invalid retry feeds the model its own\n// bad output plus the specific validation error; a transient retry just\n// resends the same prompt.\nconst item = $json;\nconst nextRetryCount = item.retryCount + 1;\n\nlet promptText = item.promptText;\nif (item.outcome === 'schema_invalid') {\n  promptText = `${item.promptText}\\n\\n---\\nYour previous response was rejected: ${item.reason}\\nYour previous raw output was:\\n${item.rawModelOutput || '(no output captured)'}\\n\\nReturn ONLY a corrected, valid JSON object matching the required schema. No prose, no markdown fences.`;\n}\n\nreturn [{\n  json: {\n    promptText,\n    model: item.model,\n    provider: item.provider,\n    promptVersion: item.promptVersion,\n    lead: item.lead,\n    workflowExecutionId: item.workflowExecutionId,\n    maxRetries: item.maxRetries,\n    confidenceHigh: item.confidenceHigh,\n    confidenceMedium: item.confidenceMedium,\n    ollamaBaseUrl: item.ollamaBaseUrl,\n    ollamaTimeoutMs: item.ollamaTimeoutMs,\n    retryCount: nextRetryCount,\n    startedAt: item.startedAt,\n  },\n}];\n"
-      }
-    },
-    {
-      "id": "n13",
-      "name": "Build Manual Review Payload",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2200, -60],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 8 -- every failure class (retries exhausted, or a\n// definitive provider rejection) still writes back through the SAME\n// qualification contract, flagged for manual review. Never leaves a lead\n// stuck at VALIDATED (TDD Section 8, 'never strand a lead').\nconst item = $json;\nconst isDefinitive = item.outcome === 'definitive';\nconst retryCount = item.retryCount || 0;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: item.workflowExecutionId,\n    workflowName: '03-ai-qualification',\n    provider: item.provider,\n    model: item.model,\n    promptVersion: item.promptVersion,\n    leadScore: 0,\n    confidence: 0,\n    priority: 'MEDIUM',\n    painPoints: [],\n    recommendedAction: 'Manual review required -- automated AI qualification did not complete successfully.',\n    summary: `AI qualification failed for ${item.lead.contactName} (${item.outcome}).`,\n    reasoning: item.reason || 'Unknown failure.',\n    needsManualReview: true,\n    errorMessage: `[${item.outcome}] ${item.reason || 'Unknown failure.'}${isDefinitive ? '' : ` (after ${retryCount} retr${retryCount === 1 ? 'y' : 'ies'})`}`,\n    durationMs: Date.now() - item.startedAt,\n    leadId: item.lead.id,\n  },\n}];\n"
-      }
-    },
-    {
-      "id": "n14",
-      "name": "Build Unsupported Provider Payload",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [660, 160],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// ADR-0020 Decision 1 -- OpenAI/Claude/Gemini are architecturally\n// supported (Select Provider is config-driven, not hardcoded) but have no\n// implemented branch this sprint. Landing here is a real, deliberate\n// definitive-failure outcome for an unconfigured provider -- not a fake\n// implementation standing in for one.\nconst config = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: config.workflowExecutionId,\n    workflowName: '03-ai-qualification',\n    provider: config.provider,\n    model: 'n/a',\n    promptVersion: config.promptVersion,\n    leadScore: 0,\n    confidence: 0,\n    priority: 'MEDIUM',\n    painPoints: [],\n    recommendedAction: 'Manual review required -- no AI provider implementation is configured for this value.',\n    summary: `AI qualification skipped for ${config.lead.contactName} -- unsupported AI_PROVIDER.`,\n    reasoning: `AI_PROVIDER=\"${config.provider}\" has no implemented provider branch in this workflow (only \"ollama\" is implemented this sprint -- see ADR-0020 Decision 1, docs/adrs/ADR-0007).`,\n    needsManualReview: true,\n    errorMessage: `Unsupported AI_PROVIDER: ${config.provider}`,\n    durationMs: 0,\n    leadId: config.lead.id,\n  },\n}];\n"
+        "jsCode": "// Sprint 5 — replaces the old Select Provider / Load Prompt Template /\n// Build Initial Prompt / Prepare Attempt / Call Ollama / Classify Ollama\n// Result / Outcome Router / Check Retry Budget / Prepare Retry chain.\n// AI Core (AiRoutingService) already resolved the Brain, prompt version,\n// provider/model, ran its own retries, and computed the HIGH/MEDIUM/LOW\n// confidence tier -- this node's only job is mapping that result onto the\n// CRM's qualification write-back contract. Same 'never strand a lead'\n// guarantee as before: every outcome, including a failed AI Core call,\n// still produces a payload for Submit Qualification.\nconst config = $('Load Config').item.json;\nconst lead = config.lead;\nconst response = $json;\n\nconst base = {\n  contractVersion: '1',\n  workflowExecutionId: config.workflowExecutionId,\n  workflowName: '03-ai-qualification',\n  leadId: lead.id,\n  durationMs: Date.now() - config.startedAt,\n};\n\nfunction manualReviewPayload(reason, errorMessage, provider, model, promptVersion) {\n  return {\n    ...base,\n    provider: provider || 'unknown',\n    model: model || 'unknown',\n    promptVersion: promptVersion || 'unknown',\n    leadScore: 0,\n    confidence: 0,\n    priority: 'MEDIUM',\n    painPoints: [],\n    recommendedAction: 'Manual review required -- automated AI qualification did not complete successfully.',\n    summary: `AI qualification failed for ${lead.contactName}.`,\n    reasoning: reason || 'Unknown failure.',\n    needsManualReview: true,\n    errorMessage,\n  };\n}\n\nif (response && response.error) {\n  const message = String((response.error && response.error.message) || response.error || 'AI Core call failed.');\n  return [{ json: manualReviewPayload(message, `[request_failed] ${message}`) }];\n}\n\nconst result = response && response.data;\n\nif (!result || result.outcome !== 'VALID' || !result.outputJson) {\n  const outcome = (result && result.outcome) || 'UNKNOWN';\n  return [{\n    json: manualReviewPayload(\n      `AI Core returned outcome=${outcome}.`,\n      `[${outcome}] AI Core did not return a usable result.`,\n      result && result.provider,\n      result && result.model,\n      result && result.promptVersion\n    ),\n  }];\n}\n\nconst parsed = result.outputJson;\nconst budget = parsed.budgetEstimate || null;\nconst tier = result.confidence; // AI Core's own HIGH/MEDIUM/LOW tier\nconst annotation = tier === 'MEDIUM' ? ' [AI-assisted, review recommended]' : '';\n\nreturn [{\n  json: {\n    ...base,\n    provider: result.provider,\n    model: result.model,\n    promptVersion: result.promptVersion,\n    leadScore: Math.round(parsed.leadScore),\n    confidence: parsed.confidence,\n    confidenceTier: tier || undefined,\n    priority: parsed.priority,\n    industry: parsed.industry || undefined,\n    companySizeEstimate: parsed.companySizeEstimate || undefined,\n    budgetEstimateMin: budget ? budget.min : undefined,\n    budgetEstimateMax: budget ? budget.max : undefined,\n    budgetEstimateCurrency: budget ? budget.currency : undefined,\n    buyingIntent: parsed.buyingIntent || undefined,\n    urgency: parsed.urgency || undefined,\n    decisionMakerIdentified: parsed.decisionMakerIdentified,\n    estimatedTimeline: parsed.estimatedTimeline || undefined,\n    riskLevel: parsed.riskLevel || undefined,\n    painPoints: parsed.painPoints || [],\n    recommendedAction: `${parsed.recommendedAction}${annotation}`,\n    summary: parsed.summary,\n    reasoning: parsed.reasoning,\n    needsManualReview: result.needsManualReview,\n  },\n}];\n"
       }
     },
     {
@@ -277,7 +68,7 @@
       "name": "Submit Qualification",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
-      "position": [2420, -160],
+      "position": [880, 0],
       "parameters": {
         "method": "PATCH",
         "url": "={{ $env.EYAN_API_BASE_URL }}/crm/service/leads/{{ $json.leadId }}/qualification",
@@ -304,53 +95,12 @@
       "main": [[{ "node": "Load Config", "type": "main", "index": 0 }]]
     },
     "Load Config": {
-      "main": [[{ "node": "Select Provider", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Call AI Core", "type": "main", "index": 0 }]]
     },
-    "Select Provider": {
-      "main": [
-        [{ "node": "Load Prompt Template", "type": "main", "index": 0 }],
-        [{ "node": "Build Unsupported Provider Payload", "type": "main", "index": 0 }]
-      ]
+    "Call AI Core": {
+      "main": [[{ "node": "Map AI Core Result", "type": "main", "index": 0 }]]
     },
-    "Load Prompt Template": {
-      "main": [[{ "node": "Build Initial Prompt", "type": "main", "index": 0 }]]
-    },
-    "Build Initial Prompt": {
-      "main": [[{ "node": "Prepare Attempt", "type": "main", "index": 0 }]]
-    },
-    "Prepare Attempt": {
-      "main": [[{ "node": "Call Ollama", "type": "main", "index": 0 }]]
-    },
-    "Call Ollama": {
-      "main": [[{ "node": "Classify Ollama Result", "type": "main", "index": 0 }]]
-    },
-    "Classify Ollama Result": {
-      "main": [[{ "node": "Outcome Router", "type": "main", "index": 0 }]]
-    },
-    "Outcome Router": {
-      "main": [
-        [{ "node": "Compute Confidence and Route", "type": "main", "index": 0 }],
-        [{ "node": "Check Retry Budget", "type": "main", "index": 0 }],
-        [{ "node": "Build Manual Review Payload", "type": "main", "index": 0 }],
-        [{ "node": "Build Manual Review Payload", "type": "main", "index": 0 }]
-      ]
-    },
-    "Check Retry Budget": {
-      "main": [
-        [{ "node": "Prepare Retry", "type": "main", "index": 0 }],
-        [{ "node": "Build Manual Review Payload", "type": "main", "index": 0 }]
-      ]
-    },
-    "Prepare Retry": {
-      "main": [[{ "node": "Prepare Attempt", "type": "main", "index": 0 }]]
-    },
-    "Compute Confidence and Route": {
-      "main": [[{ "node": "Submit Qualification", "type": "main", "index": 0 }]]
-    },
-    "Build Manual Review Payload": {
-      "main": [[{ "node": "Submit Qualification", "type": "main", "index": 0 }]]
-    },
-    "Build Unsupported Provider Payload": {
+    "Map AI Core Result": {
       "main": [[{ "node": "Submit Qualification", "type": "main", "index": 0 }]]
     }
   },

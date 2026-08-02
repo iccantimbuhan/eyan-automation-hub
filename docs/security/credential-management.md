@@ -1,6 +1,6 @@
 # Credential Management
 
-Status: Active (first real credentials — CRM domain, 2026-07-31)
+Status: Active (first real credentials — CRM domain, 2026-07-31; Sprint 5 adds a third credential reference, not yet created — see Notes)
 
 ---
 
@@ -18,8 +18,9 @@ Two credentials exist today, both created via `n8n import:credentials` (see Note
 
 | Credential Name | Type | Used By | Purpose |
 |---|---|---|---|
-| EYAN Service API | HTTP Header Auth | Every `/crm/service/*` HTTP Request node in `workflows/crm/` | Authenticates n8n's outbound calls to EYAN as `Authorization: Bearer <AUTOMATION_SERVICE_API_KEY>` |
-| EYAN Webhook Signing Secret | Crypto | Workflow 1's `Compute Expected Signature` node (Hmac action) | Verifies EYAN's inbound webhook signature (`AUTOMATION_WEBHOOK_SIGNING_SECRET`) |
+| EYAN Service API | HTTP Header Auth | Every `/crm/service/*` **and** (Sprint 5) `/ai-core/service/*` HTTP Request node in `workflows/crm/` | Authenticates n8n's outbound calls to EYAN as `Authorization: Bearer <AUTOMATION_SERVICE_API_KEY>` |
+| EYAN Webhook Signing Secret | Crypto | Workflows 1 and (Sprint 5) 4's `Compute Expected Signature` node (Hmac action) | Verifies EYAN's inbound webhook signatures (`AUTOMATION_WEBHOOK_SIGNING_SECRET`) |
+| SMTP Account | SMTP | Workflow 4's `Send Email Notification` node | Sends the sales-automation email notification — **referenced by name/id (`SmtpAccountCred01`) in `04-sales-automation.json` but not yet created**; no real SMTP server/credentials were available this session (see Notes). The Email step is gated behind `SALES_NOTIFICATION_EMAIL_TO` being set, so it fails closed (skipped, not a broken node) until this credential exists. |
 
 See `docs/adrs/ADR-0006-crm-workflow-authentication.md` for the full reasoning — including why these are two different n8n credential *types* (an outbound auth header vs. HMAC secret material are different technical needs, and n8n ships a purpose-built native type for each).
 
@@ -42,7 +43,9 @@ See `docs/adrs/ADR-0006-crm-workflow-authentication.md` for the full reasoning �
 
 # Secrets Never Committed
 
-`.env` holds the actual secret values (for re-import if the credential store is ever rebuilt); `.env.example` holds only placeholders. Both `AUTOMATION_SERVICE_API_KEY` and `AUTOMATION_WEBHOOK_SIGNING_SECRET` must match the same values configured in `eyan-ai-platform/backend/.env` — that repo was not modified this sprint (out of scope), so it still needs these values set before the integration works end-to-end in a real deployment. Rotating either secret is a paired procedure across both repos (update both `.env` files, update the two n8n credentials here, restart both services) — not yet scripted, a candidate for a future operations runbook entry.
+`.env` holds the actual secret values (for re-import if the credential store is ever rebuilt); `.env.example` holds only placeholders. Both `AUTOMATION_SERVICE_API_KEY` and `AUTOMATION_WEBHOOK_SIGNING_SECRET` must match the same values configured in `eyan-ai-platform/backend/.env` — confirmed matching and working end-to-end against a live local `eyan-ai-platform` instance this session (Sprint 5; that repo's own `.env` previously had these two unset entirely). Rotating either secret is a paired procedure across both repos (update both `.env` files, update the two n8n credentials here, restart both services) — not yet scripted, a candidate for a future operations runbook entry.
+
+`SLACK_WEBHOOK_URL` (Sprint 5, Workflow 4) is a deliberate, narrow exception to "no secret via `$env`" above — Slack incoming-webhook URLs are bearer-in-URL secrets, but n8n has no dedicated "webhook URL" credential type and building a generic-credential workaround for a single, disable-by-omission notification step was judged not worth the added indirection this sprint. Documented here as the actual practice, not silently deviating from the stated rule.
 
 ---
 

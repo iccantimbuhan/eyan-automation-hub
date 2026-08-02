@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Extracts the ACTUAL jsCode strings from 03-ai-qualification.json and runs
-// them in a mocked n8n Code-node context (Node's built-in `vm`, zero
-// dependencies — this repo has no test framework, and a plain Node script
-// covers everything these two nodes' logic needs). Tests the real workflow
-// code, not a re-implementation of it, matching the approach Workflow 1's
-// signature algorithm was verified with last sprint. Run: node
-// tests/workflows/crm/03-ai-qualification.logic.test.js
+// Extracts the ACTUAL jsCode string from 03-ai-qualification.json's "Map AI
+// Core Result" node and runs it in a mocked n8n Code-node context (Node's
+// built-in `vm`, zero dependencies — this repo has no test framework).
+// Sprint 5 replaced the direct-Ollama chain (Select Provider / Load Prompt
+// Template / Call Ollama / Classify Ollama Result / retry loop) with a
+// single HTTP call to AI Core plus this one mapping node, since AI Core now
+// owns provider selection, prompt versioning, retries, and confidence-tier
+// computation. Run: node tests/workflows/crm/03-ai-qualification.logic.test.js
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -34,16 +35,15 @@ function check(label, cond, detail) {
   }
 }
 
-// ---- Classify Ollama Result ----
-function runClassify({ attempt, response }) {
-  const code = getCode("Classify Ollama Result");
+// ---- Map AI Core Result ----
+function runMap({ config, response }) {
+  const code = getCode("Map AI Core Result");
   const sandbox = {
     $json: response,
     $: (name) => {
-      if (name !== "Prepare Attempt") throw new Error("unexpected node ref: " + name);
-      return { item: { json: attempt } };
+      if (name !== "Load Config") throw new Error("unexpected node ref: " + name);
+      return { item: { json: config } };
     },
-    Buffer,
     Date,
     console,
     result: undefined,
@@ -53,237 +53,141 @@ function runClassify({ attempt, response }) {
   return sandbox.result[0].json;
 }
 
-const baseAttempt = {
-  promptText: "p",
-  model: "qwen2.5-coder:7b",
-  provider: "ollama",
-  promptVersion: "v1",
-  lead: { id: "lead1", contactName: "Test" },
+const baseConfig = {
+  lead: { id: "lead1", contactName: "Test Lead" },
   workflowExecutionId: "exec1",
-  maxRetries: 3,
-  confidenceHigh: 0.75,
-  confidenceMedium: 0.4,
-  ollamaBaseUrl: "http://x",
-  ollamaTimeoutMs: 300000,
-  retryCount: 0,
   startedAt: Date.now() - 500,
 };
 
-const VALID_MODEL_OBJ = {
-  leadScore: 70,
+const VALID_OUTPUT_JSON = {
+  leadScore: 70.6,
   confidence: 0.8,
   priority: "HIGH",
+  industry: "SaaS",
+  companySizeEstimate: "50-200",
+  budgetEstimate: { min: 1000, max: 5000, currency: "USD" },
   buyingIntent: "HIGH",
   urgency: "MEDIUM",
   decisionMakerIdentified: true,
   estimatedTimeline: "SHORT_TERM",
   riskLevel: "LOW",
-  painPoints: [],
+  painPoints: ["slow onboarding"],
   recommendedAction: "call them",
   summary: "s",
   reasoning: "r",
 };
 
-function ollamaContentResponse(content) {
-  return { message: { role: "assistant", content } };
+function aiCoreSuccess(overrides = {}) {
+  return {
+    success: true,
+    message: "AI Capability invoked successfully.",
+    data: {
+      output: JSON.stringify(VALID_OUTPUT_JSON),
+      outputJson: VALID_OUTPUT_JSON,
+      brain: "sales-brain",
+      provider: "ollama",
+      model: "qwen2.5-coder:7b",
+      promptVersion: "v1",
+      confidence: "HIGH",
+      needsManualReview: false,
+      outcome: "VALID",
+      retryCount: 0,
+      latencyMs: 1200,
+      ...overrides,
+    },
+  };
 }
 
-// 1. Valid response
+// 1. Valid AI Core result -> full qualification payload, no annotation for HIGH
 {
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(VALID_MODEL_OBJ)) });
-  check("valid response -> outcome=valid", r.outcome === "valid", r);
-  check("valid response -> parsed.leadScore preserved", r.parsed.leadScore === 70, r.parsed);
-}
-
-// 2. Valid response wrapped in markdown fences (model disobeying instructions)
-{
-  const fenced = "```json\n" + JSON.stringify(VALID_MODEL_OBJ) + "\n```";
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(fenced) });
-  check("markdown-fenced JSON still parses -> valid", r.outcome === "valid", r);
-}
-
-// 3. Valid JSON embedded in prose (model adding commentary despite instructions)
-{
-  const prose = `Sure, here is the analysis:\n${JSON.stringify(VALID_MODEL_OBJ)}\nLet me know if you need more.`;
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(prose) });
-  check("JSON embedded in prose -> extracted and valid", r.outcome === "valid", r);
-}
-
-// 4. Completely malformed (not JSON at all)
-{
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse("I cannot help with that.") });
-  check("non-JSON text -> schema_invalid", r.outcome === "schema_invalid", r);
-}
-
-// 5. Truncated/broken JSON
-{
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse('{"leadScore": 70, "confidence":') });
-  check("truncated JSON -> schema_invalid", r.outcome === "schema_invalid", r);
-}
-
-// 6. Valid JSON, invalid enum value (priority)
-{
-  const bad = { ...VALID_MODEL_OBJ, priority: "SUPER_URGENT" };
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(bad)) });
-  check("invalid priority enum -> schema_invalid", r.outcome === "schema_invalid" && /priority/.test(r.reason), r);
-}
-
-// 7. Valid JSON, confidence out of range
-{
-  const bad = { ...VALID_MODEL_OBJ, confidence: 1.5 };
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(bad)) });
-  check("confidence > 1.0 -> schema_invalid", r.outcome === "schema_invalid" && /confidence/.test(r.reason), r);
-}
-
-// 8. Valid JSON, leadScore out of range
-{
-  const bad = { ...VALID_MODEL_OBJ, leadScore: 150 };
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(bad)) });
-  check("leadScore > 100 -> schema_invalid", r.outcome === "schema_invalid" && /leadScore/.test(r.reason), r);
-}
-
-// 9. Missing required field (recommendedAction)
-{
-  const bad = { ...VALID_MODEL_OBJ };
-  delete bad.recommendedAction;
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(bad)) });
-  check("missing recommendedAction -> schema_invalid", r.outcome === "schema_invalid" && /recommendedAction/.test(r.reason), r);
-}
-
-// 10. Valid budgetEstimate object
-{
-  const withBudget = { ...VALID_MODEL_OBJ, budgetEstimate: { min: 1000, max: 5000, currency: "USD" } };
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(withBudget)) });
-  check("valid budgetEstimate -> valid", r.outcome === "valid", r);
-}
-
-// 11. Malformed budgetEstimate (missing currency)
-{
-  const badBudget = { ...VALID_MODEL_OBJ, budgetEstimate: { min: 1000, max: 5000 } };
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(badBudget)) });
-  check("malformed budgetEstimate -> schema_invalid", r.outcome === "schema_invalid" && /budgetEstimate/.test(r.reason), r);
-}
-
-// 12. null budgetEstimate is fine (explicitly allowed)
-{
-  const nullBudget = { ...VALID_MODEL_OBJ, budgetEstimate: null };
-  const r = runClassify({ attempt: baseAttempt, response: ollamaContentResponse(JSON.stringify(nullBudget)) });
-  check("null budgetEstimate -> valid", r.outcome === "valid", r);
-}
-
-// 13. Transient error: connection refused (no http code in message)
-{
-  const r = runClassify({ attempt: baseAttempt, response: { error: { message: "connect ECONNREFUSED 172.30.0.1:11499" } } });
-  check("ECONNREFUSED -> transient", r.outcome === "transient", r);
-}
-
-// 14. Transient error: 500
-{
-  const r = runClassify({ attempt: baseAttempt, response: { error: { message: "500 - Internal Server Error" } } });
-  check("500 -> transient (not in definitive set)", r.outcome === "transient", r);
-}
-
-// 15. Transient error: timeout
-{
-  const r = runClassify({ attempt: baseAttempt, response: { error: { message: "timeout of 300000ms exceeded" } } });
-  check("timeout -> transient", r.outcome === "transient", r);
-}
-
-// 16. Definitive error: 400
-{
-  const r = runClassify({ attempt: baseAttempt, response: { error: { message: '400 - "model not found"' } } });
-  check("400 -> definitive", r.outcome === "definitive", r);
-}
-
-// 17. Definitive error: 404
-{
-  const r = runClassify({ attempt: baseAttempt, response: { error: { message: "404 - Not Found" } } });
-  check("404 -> definitive", r.outcome === "definitive", r);
-}
-
-// 18. Definitive error via explicit httpCode field
-{
-  const r = runClassify({ attempt: baseAttempt, response: { error: { message: "Unauthorized", httpCode: "401" } } });
-  check("explicit httpCode 401 -> definitive", r.outcome === "definitive", r);
-}
-
-// ---- Compute Confidence and Route ----
-function runConfidence(item) {
-  const code = getCode("Compute Confidence and Route");
-  const sandbox = { $json: item, console, result: undefined };
-  vm.createContext(sandbox);
-  vm.runInContext(`result = (function(){ ${code} })()`, sandbox);
-  return sandbox.result[0].json;
-}
-
-const confBase = {
-  workflowExecutionId: "exec1",
-  provider: "ollama",
-  model: "m",
-  promptVersion: "v1",
-  latencyMs: 1200,
-  lead: { id: "lead1" },
-};
-
-// 19. High confidence boundary (exactly 0.75 -> HIGH, not medium)
-{
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0.75 } });
-  check("confidence == high threshold -> not manual review, no annotation", r.needsManualReview === false && !/AI-assisted/.test(r.recommendedAction), r);
-}
-
-// 20. Just below high threshold -> MEDIUM (annotated, still automated)
-{
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0.7499 } });
-  check("confidence just below high -> annotated MEDIUM, not manual review", r.needsManualReview === false && /AI-assisted/.test(r.recommendedAction), r);
-}
-
-// 21. Medium threshold boundary (exactly 0.4 -> MEDIUM)
-{
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0.4 } });
-  check("confidence == medium threshold -> MEDIUM tier, automated", r.needsManualReview === false && /AI-assisted/.test(r.recommendedAction), r);
-}
-
-// 22. Just below medium threshold -> LOW -> manual review
-{
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0.3999 } });
-  check("confidence just below medium -> needsManualReview true", r.needsManualReview === true, r);
-}
-
-// 23. Zero confidence -> LOW -> manual review
-{
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0 } });
-  check("confidence 0 -> needsManualReview true", r.needsManualReview === true, r);
-}
-
-// 24. leadScore rounding
-{
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0.9, leadScore: 70.6 } });
+  const r = runMap({ config: baseConfig, response: aiCoreSuccess() });
+  check("valid VALID outcome -> leadId/workflowExecutionId carried through", r.leadId === "lead1" && r.workflowExecutionId === "exec1", r);
   check("leadScore rounds to nearest int", r.leadScore === 71, r);
+  check("confidence is the model's own numeric value, not the tier", r.confidence === 0.8, r);
+  check("confidenceTier is AI Core's HIGH/MEDIUM/LOW tier", r.confidenceTier === "HIGH", r);
+  check("HIGH tier -> no [AI-assisted] annotation", r.recommendedAction === "call them", r);
+  check("needsManualReview passed through from AI Core, not recomputed", r.needsManualReview === false, r);
+  check("provider/model/promptVersion come from AI Core's response", r.provider === "ollama" && r.model === "qwen2.5-coder:7b" && r.promptVersion === "v1", r);
 }
 
-// 25. budgetEstimate flattened correctly into DTO shape
+// 2. MEDIUM tier -> annotated recommendedAction, still not manual review
 {
-  const r = runConfidence({
-    ...confBase,
-    confidenceHigh: 0.75,
-    confidenceMedium: 0.4,
-    parsed: { ...VALID_MODEL_OBJ, confidence: 0.9, budgetEstimate: { min: 100, max: 200, currency: "EUR" } },
-  });
+  const r = runMap({ config: baseConfig, response: aiCoreSuccess({ confidence: "MEDIUM" }) });
+  check("MEDIUM tier -> [AI-assisted] annotation added", /AI-assisted/.test(r.recommendedAction), r);
+}
+
+// 3. LOW tier -> no annotation (needsManualReview carries the signal instead)
+{
+  const r = runMap({ config: baseConfig, response: aiCoreSuccess({ confidence: "LOW", needsManualReview: true }) });
+  check("LOW tier -> no [AI-assisted] annotation", !/AI-assisted/.test(r.recommendedAction), r);
+  check("LOW tier -> needsManualReview true", r.needsManualReview === true, r);
+}
+
+// 4. budgetEstimate flattened correctly into DTO shape
+{
+  const r = runMap({ config: baseConfig, response: aiCoreSuccess() });
   check(
     "budgetEstimate flattened to budgetEstimateMin/Max/Currency",
-    r.budgetEstimateMin === 100 && r.budgetEstimateMax === 200 && r.budgetEstimateCurrency === "EUR",
+    r.budgetEstimateMin === 1000 && r.budgetEstimateMax === 5000 && r.budgetEstimateCurrency === "USD",
     r
   );
 }
 
-// 26. null budgetEstimate -> flattened fields undefined (not sent)
+// 5. null budgetEstimate -> flattened fields undefined (not sent)
 {
-  const r = runConfidence({ ...confBase, confidenceHigh: 0.75, confidenceMedium: 0.4, parsed: { ...VALID_MODEL_OBJ, confidence: 0.9, budgetEstimate: null } });
+  const outputWithNullBudget = { ...VALID_OUTPUT_JSON, budgetEstimate: null };
+  const r = runMap({
+    config: baseConfig,
+    response: aiCoreSuccess({ output: JSON.stringify(outputWithNullBudget), outputJson: outputWithNullBudget }),
+  });
   check(
     "null budgetEstimate -> flattened fields all undefined",
     r.budgetEstimateMin === undefined && r.budgetEstimateMax === undefined && r.budgetEstimateCurrency === undefined,
     r
   );
+}
+
+// 6. AI Core outcome=SCHEMA_INVALID (retries exhausted on AI Core's side) -> manual review payload
+{
+  const r = runMap({
+    config: baseConfig,
+    response: aiCoreSuccess({ outcome: "SCHEMA_INVALID", outputJson: undefined, output: "not json" }),
+  });
+  check("SCHEMA_INVALID outcome -> needsManualReview true", r.needsManualReview === true, r);
+  check("SCHEMA_INVALID outcome -> leadScore 0, confidence 0", r.leadScore === 0 && r.confidence === 0, r);
+  check("SCHEMA_INVALID outcome -> no confidenceTier (stays AI_ANALYZED backend-side)", r.confidenceTier === undefined, r);
+  check("SCHEMA_INVALID outcome -> errorMessage mentions the outcome", /SCHEMA_INVALID/.test(r.errorMessage), r);
+}
+
+// 7. AI Core outcome=DEFINITIVE_FAILURE -> manual review payload, provider/model still carried
+{
+  const r = runMap({
+    config: baseConfig,
+    response: aiCoreSuccess({ outcome: "DEFINITIVE_FAILURE", outputJson: undefined, provider: "ollama", model: "qwen2.5-coder:7b" }),
+  });
+  check("DEFINITIVE_FAILURE -> needsManualReview true", r.needsManualReview === true, r);
+  check("DEFINITIVE_FAILURE -> provider/model still carried for the audit trail", r.provider === "ollama" && r.model === "qwen2.5-coder:7b", r);
+}
+
+// 8. HTTP request itself failed (network error, AI Core unreachable) -> manual review payload
+{
+  const r = runMap({ config: baseConfig, response: { error: { message: "connect ECONNREFUSED 127.0.0.1:3001" } } });
+  check("network failure -> needsManualReview true", r.needsManualReview === true, r);
+  check("network failure -> provider/model default to 'unknown', never crash", r.provider === "unknown" && r.model === "unknown", r);
+  check("network failure -> errorMessage captures the request failure", /request_failed/.test(r.errorMessage), r);
+}
+
+// 9. leadId/workflowExecutionId always present even on every failure path (never strand a lead)
+{
+  const failureCases = [
+    aiCoreSuccess({ outcome: "TRANSIENT_FAILURE", outputJson: undefined }),
+    { error: { message: "timeout" } },
+  ];
+  for (const response of failureCases) {
+    const r = runMap({ config: baseConfig, response });
+    check("failure path still carries leadId/workflowExecutionId", r.leadId === "lead1" && r.workflowExecutionId === "exec1", r);
+    check("failure path still sets workflowName/contractVersion for Submit Qualification", r.workflowName === "03-ai-qualification" && r.contractVersion === "1", r);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed (${pass + fail} total assertions)`);
