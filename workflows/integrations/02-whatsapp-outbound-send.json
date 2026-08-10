@@ -1,0 +1,143 @@
+{
+  "id": "WhatsappOutboundSendWf01",
+  "name": "WhatsApp - 02 - Outbound Send",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Validate Send Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Reusable outbound WhatsApp send -- expected caller input:\n//   { to: '<E.164 or WhatsApp ID>', messageType: 'text', text: '<body>', contextTag?: '<free-text audit label>' }\n// contextTag is optional and purely for audit/log readability (e.g.\n// 'gateway-test-reply') -- never used for any control-flow decision here.\n// Only 'text' messages are supported this phase; template messages are a\n// documented future extension (see docs/adrs/ADR-0010-whatsapp-outbound-messaging.md).\nconst input = $json || {};\nconst to = typeof input.to === 'string' ? input.to.trim() : '';\nconst messageType = input.messageType || 'text';\nconst text = typeof input.text === 'string' ? input.text : '';\n\nlet reason = null;\nif (!to) {\n  reason = 'Missing \"to\" (recipient WhatsApp ID / phone number).';\n} else if (messageType !== 'text') {\n  reason = `Unsupported messageType \"${messageType}\" -- only \"text\" is implemented.`;\n} else if (!text.trim()) {\n  reason = 'Missing \"text\" for a text message.';\n}\n\nreturn [{\n  json: {\n    valid: reason === null,\n    reason,\n    to,\n    messageType,\n    text,\n    contextTag: input.contextTag || null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Send Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [440, 0],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Result - Invalid Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 120],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    success: false,\n    error: { type: 'invalid_input', message: $json.reason },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Build Graph API Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -120],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Meta WhatsApp Cloud API send-message contract:\n// https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages\nreturn [{\n  json: {\n    to: $json.to,\n    contextTag: $json.contextTag,\n    requestBody: {\n      messaging_product: 'whatsapp',\n      to: $json.to,\n      type: 'text',\n      text: { body: $json.text, preview_url: false },\n    },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Send WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [880, -120],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/' + $env.WHATSAPP_GRAPH_API_VERSION + '/' + $env.WHATSAPP_PHONE_NUMBER_ID + '/messages' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "whatsAppApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "whatsAppApi": {
+          "id": "MetaWhatsAppCloudApiCred01",
+          "name": "Meta WhatsApp Cloud API"
+        }
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Map Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -120],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// \"Send WhatsApp Message\" has onError: continueRegularOutput, so a failed\n// call surfaces as $json.error here rather than throwing -- same pattern\n// as workflows/crm/03-ai-qualification.json's \"Map AI Core Result\".\nconst result = $json || {};\n\nif (result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  return [{ json: { success: false, error: { type: 'meta_api_error', message } } }];\n}\n\nconst messageId = (Array.isArray(result.messages) && result.messages[0] && result.messages[0].id) || null;\nconst waId = (Array.isArray(result.contacts) && result.contacts[0] && result.contacts[0].wa_id) || null;\n\nreturn [{\n  json: {\n    success: true,\n    messageId,\n    to: waId,\n  },\n}];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [[{ "node": "Validate Send Input", "type": "main", "index": 0 }]]
+    },
+    "Validate Send Input": {
+      "main": [[{ "node": "Send Input Valid?", "type": "main", "index": 0 }]]
+    },
+    "Send Input Valid?": {
+      "main": [
+        [{ "node": "Build Graph API Request", "type": "main", "index": 0 }],
+        [{ "node": "Result - Invalid Input", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Graph API Request": {
+      "main": [[{ "node": "Send WhatsApp Message", "type": "main", "index": 0 }]]
+    },
+    "Send WhatsApp Message": {
+      "main": [[{ "node": "Map Send Result", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

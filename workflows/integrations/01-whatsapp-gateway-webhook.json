@@ -1,0 +1,332 @@
+{
+  "id": "WhatsappGatewayWebhookWf01",
+  "name": "WhatsApp Gateway — Webhook",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Webhook - WhatsApp Gateway",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 80],
+      "webhookId": "whatsapp-gateway-webhook-01",
+      "parameters": {
+        "multipleMethods": true,
+        "httpMethod": ["GET", "POST"],
+        "path": "whatsapp/webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Verify Meta Webhook Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, -160],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Meta calls GET .../whatsapp/webhook with hub.mode, hub.verify_token,\n// hub.challenge query params whenever the webhook subscription is\n// (re-)verified from the Meta App dashboard.\n//\n// WHATSAPP_VERIFY_TOKEN is a plain shared secret with no purpose-built n8n\n// credential type -- it's neither an outbound auth header nor HMAC key\n// material, just a static string Meta echoes back to prove it was\n// configured with the right value. Read via $env as a documented, narrow\n// exception -- same posture as SLACK_WEBHOOK_URL in\n// docs/security/credential-management.md (\"a bearer secret with no\n// dedicated n8n credential type, not worth a generic-credential\n// workaround for one comparison\").\n//\n// Requirement 6 (never expose the token in logs or response data): this\n// node never logs headers/query, and its output carries only a boolean\n// plus the (non-secret) challenge string -- never receivedToken or\n// expectedToken themselves.\nconst query = $json.query || {};\nconst mode = query['hub.mode'];\nconst receivedToken = query['hub.verify_token'];\nconst challenge = query['hub.challenge'];\n\nconst expectedToken = $env.WHATSAPP_VERIFY_TOKEN || '';\nconst verified = mode === 'subscribe'\n  && typeof receivedToken === 'string'\n  && expectedToken.length > 0\n  && receivedToken === expectedToken;\n\nreturn [{\n  json: {\n    verified,\n    challenge: verified ? String(challenge ?? '') : null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Verification Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [460, -160],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.verified }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Respond - Challenge OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [680, -240],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Respond - Verification Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [680, -80],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { error: 'Webhook verification failed.' } }}",
+        "options": {
+          "responseCode": 403
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Parse WhatsApp Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 240],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Meta's WhatsApp Business Account webhook envelope:\n// { object: 'whatsapp_business_account', entry: [ { id, changes: [ { value: {\n//   metadata: { phone_number_id }, contacts: [...], messages: [...] |\n//   statuses: [...] } } ] } ] }\n// (https://developers.facebook.com/docs/graph-api/webhooks/getting-started).\n// Meta can batch multiple entries/changes/messages in a single call, and\n// sends BOTH inbound messages and status callbacks (delivered/read) through\n// this same endpoint -- both are handled defensively here rather than\n// assuming exactly one text message per call. Only `messages` are surfaced\n// downstream; status-only payloads are still a valid, ack'd WhatsApp event\n// (handled by \"Has Messages?\"), just nothing to normalize yet.\nlet body = $json.body;\nif (typeof body === 'string') {\n  try {\n    body = JSON.parse(body);\n  } catch (error) {\n    return [{ json: { valid: false, reason: 'Malformed JSON body.', messages: [] } }];\n  }\n}\n\nif (!body || typeof body !== 'object') {\n  return [{ json: { valid: false, reason: 'Empty or non-object body.', messages: [] } }];\n}\n\nif (body.object !== 'whatsapp_business_account') {\n  return [{ json: { valid: false, reason: `Not a WhatsApp Business Account event (object: ${body.object}).`, messages: [] } }];\n}\n\nconst messages = [];\nfor (const entry of (Array.isArray(body.entry) ? body.entry : [])) {\n  const whatsappBusinessAccountId = entry.id || null;\n\n  for (const change of (Array.isArray(entry.changes) ? entry.changes : [])) {\n    const value = change.value || {};\n    const metadata = value.metadata || {};\n    const phoneNumberId = metadata.phone_number_id || null;\n    const contacts = Array.isArray(value.contacts) ? value.contacts : [];\n\n    for (const message of (Array.isArray(value.messages) ? value.messages : [])) {\n      const contact = contacts.find((c) => c.wa_id === message.from) || contacts[0] || {};\n      messages.push({\n        whatsappBusinessAccountId,\n        phoneNumberId,\n        customerWhatsappId: message.from || contact.wa_id || null,\n        customerDisplayName: (contact.profile && contact.profile.name) || null,\n        messageId: message.id || null,\n        messageType: message.type || null,\n        messageText: message.type === 'text' ? ((message.text && message.text.body) || null) : null,\n        timestamp: message.timestamp || null,\n        raw: message,\n      });\n    }\n  }\n}\n\nreturn [{ json: { valid: true, reason: null, messages } }];\n"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Is WhatsApp Business Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [460, 240],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Respond - Not WhatsApp Event",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [680, 400],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: false, message: $json.reason } }}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Has Messages?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [680, 160],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.messages.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Respond - No Messages (Ack)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [900, 320],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true, ignored: true } }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "n11",
+      "name": "Respond - Message Received",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [900, 80],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true } }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "n12",
+      "name": "Normalize WhatsApp Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 80],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Executes AFTER \"Respond - Message Received\" has already sent the 200 ack\n// above (mirrors workflows/crm/01-lead-intake.json's Respond-then-continue\n// ordering) so Meta's round-trip isn't held open for this step.\n//\n// Builds the multi-tenant-ready internal event this gateway exists to\n// produce. Tenant RESOLUTION itself -- mapping\n// (whatsappBusinessAccountId, phoneNumberId) to an actual EYAN tenant -- is\n// explicitly out of scope here; this workflow only guarantees the lookup\n// keys are present. A future tenant registry / AI-CRM handoff owns that\n// mapping, matching the \"Tenant -> WhatsApp Integration -> WABA + Phone\n// Number\" architecture this gateway is designed not to foreclose.\n//\n// messageId (Meta's wamid) is the idempotency key a future persistence\n// layer should dedupe on -- no dedup store exists yet (out of scope for\n// this milestone), so this workflow can re-normalize the same message if\n// Meta retries the webhook delivery. That's why the 200 ack above happens\n// as early as possible: it's this workflow's main defense against\n// unnecessary Meta retries in the meantime.\nconst parsed = $('Parse WhatsApp Payload').item.json;\n\nreturn parsed.messages.map((message) => ({\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: $execution.id,\n    workflowName: 'whatsapp-gateway-webhook',\n    channel: 'whatsapp',\n    // Multi-tenant lookup keys -- NOT a resolved tenant.\n    whatsappBusinessAccountId: message.whatsappBusinessAccountId,\n    phoneNumberId: message.phoneNumberId,\n    customerWhatsappId: message.customerWhatsappId,\n    customerDisplayName: message.customerDisplayName,\n    messageId: message.messageId,\n    messageType: message.messageType,\n    messageText: message.messageText,\n    messageTimestamp: message.timestamp,\n    receivedAt: new Date().toISOString(),\n    // Original Meta message object, preserved for debugging/auditing.\n    rawMessage: message.raw,\n  },\n}));\n"
+      }
+    },
+    {
+      "id": "n13",
+      "name": "Ready For AI / CRM Processing",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1340, 0],
+      "parameters": {}
+    },
+    {
+      "id": "n14",
+      "name": "Is Test Keyword Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1340, 160],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.messageText || '').trim().toLowerCase() }}",
+              "rightValue": "eyan-test",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n15",
+      "name": "Build Test Reply Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 160],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Deliberately gated behind an explicit test keyword (case-insensitive\n// EXACT match on the whole inbound message text, checked by \"Is Test\n// Keyword Message?\" upstream) -- this is NOT an auto-reply to every\n// inbound message. A human has to type exactly \"eyan-test\" to trigger it.\n//\n// No loop risk: Meta status callbacks for OUR own outbound sends (this\n// reply included) arrive as `value.statuses`, which \"Parse WhatsApp\n// Payload\"/\"Has Messages?\" upstream never turn into a normalized message\n// in the first place -- they never reach this node or the keyword check\n// at all. And even hypothetically, the reply text below is NOT the literal\n// string \"eyan-test\", so it could never re-trigger this same gate.\nreturn [{\n  json: {\n    to: $json.customerWhatsappId,\n    messageType: 'text',\n    text: `[EYAN TEST REPLY] Received your test message (id: ${$json.messageId}). This is a controlled reply from the WhatsApp outbound-send capability -- not an automatic response to real customer messages.`,\n    contextTag: 'gateway-test-reply',\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n16",
+      "name": "Call Outbound Send - Test Reply",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "onError": "continueRegularOutput",
+      "position": [1780, 160],
+      "parameters": {
+        "workflowId": "WhatsappOutboundSendWf01"
+      }
+    },
+    {
+      "id": "n17",
+      "name": "Test Reply Sent",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2000, 160],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Webhook - WhatsApp Gateway": {
+      "main": [
+        [{ "node": "Verify Meta Webhook Challenge", "type": "main", "index": 0 }],
+        [{ "node": "Parse WhatsApp Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verify Meta Webhook Challenge": {
+      "main": [[{ "node": "Verification Valid?", "type": "main", "index": 0 }]]
+    },
+    "Verification Valid?": {
+      "main": [
+        [{ "node": "Respond - Challenge OK", "type": "main", "index": 0 }],
+        [{ "node": "Respond - Verification Failed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse WhatsApp Payload": {
+      "main": [[{ "node": "Is WhatsApp Business Event?", "type": "main", "index": 0 }]]
+    },
+    "Is WhatsApp Business Event?": {
+      "main": [
+        [{ "node": "Has Messages?", "type": "main", "index": 0 }],
+        [{ "node": "Respond - Not WhatsApp Event", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Messages?": {
+      "main": [
+        [{ "node": "Respond - Message Received", "type": "main", "index": 0 }],
+        [{ "node": "Respond - No Messages (Ack)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Respond - Message Received": {
+      "main": [[{ "node": "Normalize WhatsApp Messages", "type": "main", "index": 0 }]]
+    },
+    "Normalize WhatsApp Messages": {
+      "main": [[{ "node": "Is Test Keyword Message?", "type": "main", "index": 0 }]]
+    },
+    "Is Test Keyword Message?": {
+      "main": [
+        [{ "node": "Build Test Reply Input", "type": "main", "index": 0 }],
+        [{ "node": "Ready For AI / CRM Processing", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Test Reply Input": {
+      "main": [[{ "node": "Call Outbound Send - Test Reply", "type": "main", "index": 0 }]]
+    },
+    "Call Outbound Send - Test Reply": {
+      "main": [[{ "node": "Test Reply Sent", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

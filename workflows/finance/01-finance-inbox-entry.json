@@ -1,0 +1,156 @@
+{
+  "id": "FinanceInboxEntryWf01",
+  "name": "Finance - 01 - Inbox Entry",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Slack Trigger - Inbox Message",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "webhookId": "finance-inbox-entry-01",
+      "parameters": {
+        "trigger": ["message", "app_mention"],
+        "watchWorkspace": true,
+        "downloadFiles": false,
+        "options": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "SlackApiCred01",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Ignore Bot / System Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [220, 0],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ !$json.bot_id && $json.subtype !== 'bot_message' && $json.subtype !== 'message_changed' && $json.subtype !== 'message_deleted' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Normalize Slack Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Channel-agnostic envelope (AI Finance Inbox implementation plan, Phase 1)\n// -- only this node and the reply-formatting/Slack nodes below know Slack's\n// payload shape. Everything from \"Build Router Input\" onward receives a\n// shape any future front door (Telegram, WhatsApp, Retell, OCR, Web Chat)\n// could produce identically.\n//\n// SlackTrigger's webhook() handler returns `req.body.event` directly as the\n// item's json (confirmed by reading SlackTrigger.node.js in this exact n8n\n// version) -- there is no `.event` wrapper here, unlike EYAN's own signed\n// webhooks in workflows/crm/.\nconst event = $json;\n\nconst attachments = Array.isArray(event.files)\n  ? event.files.map((file) => ({\n      url: file.url_private || null,\n      mimeType: file.mimetype || null,\n      name: file.name || null,\n    }))\n  : [];\n\nreturn [{\n  json: {\n    // Channel-agnostic request -- forwarded to the Finance Intent Router\n    // unchanged (see \"Build Router Input\"). No intent classification, no\n    // Finance-specific validation happens here or anywhere in this workflow.\n    channel: 'slack',\n    externalUserId: event.user || null,\n    externalMessageId: event.event_ts || event.ts || null,\n    rawText: event.text || '',\n    attachments,\n    receivedAt: new Date().toISOString(),\n    // Slack-specific reply-routing info -- kept here only, never forwarded\n    // past \"Build Router Input\" below. Used later by \"Format Slack Reply\" /\n    // \"Slack - Post Reply\" to know where to send the response, referenced\n    // by node name ($('Normalize Slack Input')) rather than threaded through\n    // the Router's input/output.\n    slackChannelId: event.channel || null,\n    slackThreadTs: event.thread_ts || event.ts || null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Build Router Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// $execution.id is n8n's own execution ID for THIS (the front-door)\n// execution -- generated exactly once, here, and threaded UNCHANGED through\n// every subsequent Execute Workflow hop (the Finance Intent Router, and\n// whichever intent handler the Router dispatches to in turn). It must never\n// be regenerated at a later hop: $execution.id read inside a downstream\n// workflow would be that workflow's OWN, different execution ID, which\n// would silently break the idempotency check every Finance write endpoint\n// relies on (see eyan-ai-platform ADR-0024, and the AI Finance Inbox\n// implementation plan's idempotency-threading note).\nconst normalized = $('Normalize Slack Input').item.json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: $execution.id,\n    workflowName: '01-finance-inbox-entry',\n    channel: normalized.channel,\n    externalUserId: normalized.externalUserId,\n    externalMessageId: normalized.externalMessageId,\n    rawText: normalized.rawText,\n    attachments: normalized.attachments,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Call Finance Intent Router",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "onError": "continueRegularOutput",
+      "position": [880, 0],
+      "parameters": {
+        "workflowId": "FinanceIntentRouterWf01"
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Format Slack Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Generic pass-through formatting only -- this node never inspects intent,\n// category, amount, or any Finance-specific field (per this workflow's\n// scope: normalize, generate the execution ID, route, reply -- nothing\n// else). The Finance Intent Router (and whichever handler it dispatches to)\n// is solely responsible for producing a human-readable `message`; this\n// node's only job is picking a safe fallback when that response is missing\n// or the call itself failed -- e.g. the Router doesn't exist yet (this\n// phase), or errored. \"Call Finance Intent Router\" has onError:\n// continueRegularOutput set, so a failed call surfaces as $json.error here\n// rather than crashing the execution -- same pattern as\n// workflows/crm/03-ai-qualification.json's \"Map AI Core Result\" reading\n// $json.error after \"Call AI Core\".\nconst result = $json || {};\n\nlet replyText;\nif (result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  replyText = \"Sorry, I couldn't process that just now. Please try again in a moment.\";\n  console.log(`[Format Slack Reply] Finance Intent Router call failed: ${message}`);\n} else if (typeof result.message === 'string' && result.message.trim()) {\n  replyText = result.message;\n} else {\n  replyText = \"Sorry, I couldn't process that just now. Please try again in a moment.\";\n}\n\nreturn [{ json: { replyText } }];\n"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Slack - Post Reply",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.5,
+      "onError": "continueRegularOutput",
+      "position": [1320, 0],
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $('Normalize Slack Input').item.json.slackChannelId }}",
+          "mode": "id"
+        },
+        "messageType": "text",
+        "text": "={{ $json.replyText }}",
+        "options": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "SlackApiCred01",
+          "name": "Slack API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Slack Trigger - Inbox Message": {
+      "main": [[{ "node": "Ignore Bot / System Message?", "type": "main", "index": 0 }]]
+    },
+    "Ignore Bot / System Message?": {
+      "main": [
+        [{ "node": "Normalize Slack Input", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Normalize Slack Input": {
+      "main": [[{ "node": "Build Router Input", "type": "main", "index": 0 }]]
+    },
+    "Build Router Input": {
+      "main": [[{ "node": "Call Finance Intent Router", "type": "main", "index": 0 }]]
+    },
+    "Call Finance Intent Router": {
+      "main": [[{ "node": "Format Slack Reply", "type": "main", "index": 0 }]]
+    },
+    "Format Slack Reply": {
+      "main": [[{ "node": "Slack - Post Reply", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
