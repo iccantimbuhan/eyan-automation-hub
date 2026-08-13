@@ -6,13 +6,13 @@ Category: Integrations
 
 Owner: EYAN Automation Hub
 
-Version: 1.1 (adds the keyword-gated test-reply branch — see ADR-0010)
+Version: 1.2 (plugs `Ready For AI / CRM Processing` into the WhatsApp Finance Entry adapter — see ADR-0013)
 
 ---
 
 # Purpose
 
-Receive inbound WhatsApp traffic from Meta's Cloud API (webhook verification + incoming messages), normalize it into a channel-agnostic internal event, and hand off to whatever processes it next — currently the keyword-gated test-reply path (ADR-0010); a future AI/CRM workflow is expected to replace that.
+Receive inbound WhatsApp traffic from Meta's Cloud API (webhook verification + incoming messages), normalize it into a channel-agnostic internal event, and hand off to whatever processes it next: the keyword-gated test-reply path (ADR-0010) for the literal `"eyan-test"` message, or — since Phase 3B — `workflows/finance/03-whatsapp-finance-entry.json` for every other message (ADR-0013). This workflow itself stays Finance-agnostic; it owns WhatsApp transport concerns only.
 
 ---
 
@@ -43,19 +43,21 @@ Single `n8n-nodes-base.webhook` node, `multipleMethods: true`, listening on both
 3. `Is WhatsApp Business Event?` → 400 if the payload isn't a `whatsapp_business_account` envelope at all.
 4. `Has Messages?` → 200 `{received:true,ignored:true}` if it's a valid envelope with no messages (e.g. a status callback) — **this is the mechanism that makes status callbacks for our own outbound sends structurally unable to trigger a reply, see ADR-0010**.
 5. If there are messages: **fast 200 ack first** (`Respond - Message Received`), then `Normalize WhatsApp Messages` runs in the background, producing one internal event per message.
-6. `Is Test Keyword Message?` (added in ADR-0010): if the message text is *exactly* `"eyan-test"` (case-insensitive), build a reply and call `WhatsappOutboundSendWf01`. Otherwise, unchanged from before ADR-0010 — stop at `Ready For AI / CRM Processing` (a NoOp placeholder for the next milestone).
+6. `Is Test Keyword Message?` (added in ADR-0010): if the message text is *exactly* `"eyan-test"` (case-insensitive), build a reply and call `WhatsappOutboundSendWf01`. Otherwise: `Ready For AI / CRM Processing` (NoOp, kept as a named marker/audit point) → `Call WhatsApp Finance Entry` (`Execute Workflow`, `FinanceWhatsAppEntryWf01`, `onError: continueRegularOutput`) → `Finance Entry Dispatched` (NoOp, terminal). Added in Phase 3B (ADR-0013) — this Gateway does not build the Finance Inbox Request Contract itself or inspect the adapter's response; it only dispatches the already-normalized event and stops.
 
 ---
 
 # Integrations
 
-- Meta WhatsApp Cloud API (inbound only — no outbound calls happen in this workflow directly; the test-reply branch delegates to `WhatsappOutboundSendWf01`)
+- Meta WhatsApp Cloud API (inbound only — no outbound calls happen in this workflow directly; the test-reply branch delegates to `WhatsappOutboundSendWf01`, and every other message delegates to `FinanceWhatsAppEntryWf01`, which itself calls `WhatsappOutboundSendWf01` for its own reply)
 
 ---
 
 # Outputs
 
 Normalized event (see `workflows/integrations/01-whatsapp-gateway-webhook.json`'s `Normalize WhatsApp Messages` node): `whatsappBusinessAccountId`, `phoneNumberId`, `customerWhatsappId`, `customerDisplayName`, `messageId`, `messageType`, `messageText`, `messageTimestamp`, `rawMessage` (original Meta payload, preserved for audit).
+
+**Known limitation**: for non-`text` message types (e.g. `image`, `document`), `Parse WhatsApp Payload` sets `messageText: null` — this workflow does not resolve WhatsApp media IDs to downloadable URLs (that requires a separate, authenticated Graph API call this workflow does not currently make), so no media/attachment data is surfaced at all yet. A downstream consumer (e.g. `03-whatsapp-finance-entry.json`) receiving such a message sees empty text and no attachments, and degrades safely rather than crashing (see ADR-0013 Consequences).
 
 ---
 

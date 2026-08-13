@@ -1,0 +1,152 @@
+{
+  "id": "FinanceWhatsAppEntryWf01",
+  "name": "Finance - 03 - WhatsApp Entry",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Validate WhatsApp Event Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Defensive input validation -- this workflow could in principle be called\n// directly (e.g. a future WhatsApp-based support/CRM front door, or manual\n// testing via `n8n execute`), not only via\n// workflows/integrations/01-whatsapp-gateway-webhook.json's \"Ready For AI /\n// CRM Processing\" branch, so it never trusts its caller blindly -- same\n// posture as 02-finance-intent-router.json's \"Validate Request Contract\"\n// and 10-handle-create-expense.json's \"Validate Handler Input\".\n//\n// This checks the shape THIS ADAPTER needs to build a Finance Inbox\n// Request and a WhatsApp reply. It is NOT the Finance Inbox Request\n// Contract shape (that's built next, in \"Build Finance Inbox Request\") and\n// it is NOT Finance-specific validation -- no amount/category/date rules\n// belong here at all.\nconst req = $json || {};\nconst reasons = [];\n\nfunction requireNonEmptyString(field) {\n  if (typeof req[field] !== 'string' || req[field].trim().length === 0) {\n    reasons.push(`Missing/empty required field: ${field}.`);\n  }\n}\n\n// workflowExecutionId: this adapter's one hard requirement. Without it\n// there is no idempotency key to thread through the Router/Handler/Finance\n// API chain -- see ADR-0013 for why this adapter reuses the Gateway's own\n// value rather than generating one itself.\nrequireNonEmptyString('workflowExecutionId');\n// customerWhatsappId: this adapter's own reply-routing requirement (mirrors\n// 10-handle-create-expense.json's Handler-specific externalUserId rule) --\n// without a real WhatsApp ID there is no safe recipient for any reply,\n// success or failure.\nrequireNonEmptyString('customerWhatsappId');\n\nreturn [{\n  json: {\n    valid: reasons.length === 0,\n    reason: reasons.join(' '),\n    workflowExecutionId: req.workflowExecutionId,\n    customerWhatsappId: req.customerWhatsappId || null,\n    messageId: req.messageId || null,\n    messageType: req.messageType || null,\n    messageText: typeof req.messageText === 'string' ? req.messageText : '',\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "WhatsApp Event Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [440, 0],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Build Invalid Event Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 160],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Malformed/unexpected input from whatever called this workflow -- logged\n// for diagnosis. No WhatsApp reply is attempted here since a safe\n// recipient could not even be confirmed (see \"Validate WhatsApp Event\n// Input\"). This never reaches the Finance Intent Router.\nconst v = $json;\nconsole.log(`[Build Invalid Event Response] Rejected malformed WhatsApp event: ${v.reason}`);\nreturn [{ json: { dispatched: false, reason: v.reason } }];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Build Finance Inbox Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -100],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Maps the WhatsApp-native envelope (already normalized by\n// 01-whatsapp-gateway-webhook.json's \"Normalize WhatsApp Messages\") onto\n// the channel-agnostic Finance Inbox Request Contract (ADR-0008 Decision 1,\n// docs/workflows/finance-inbox-contract.md). WhatsApp-specific fields\n// (customerWhatsappId, messageId, messageType) are deliberately NOT\n// forwarded past this node into the Router -- they stay local to this\n// adapter, referenced later by node name ($('Validate WhatsApp Event\n// Input')) the same way 01-finance-inbox-entry.json keeps\n// slackChannelId/slackThreadTs local to itself rather than threading them\n// through the Router.\n//\n// workflowExecutionId is NOT generated here via $execution.id. This\n// workflow is not the true channel-entry boundary -- the Gateway\n// (workflows/integrations/01-whatsapp-gateway-webhook.json) is, since it\n// owns the actual Meta webhook trigger. The Gateway already generated\n// workflowExecutionId as ITS OWN $execution.id (in its \"Normalize WhatsApp\n// Messages\" node) and this adapter forwards that value unchanged, exactly\n// like every other downstream hop in this chain (Router, Handler). See\n// docs/adrs/ADR-0013-whatsapp-finance-entry-adapter.md for the full\n// reasoning.\n//\n// workflowName IS this adapter's own slug, not the Gateway's -- matching\n// the established per-hop-self-identifies convention\n// (workflows/crm/03-ai-qualification.json's \"Call AI Core\",\n// 10-handle-create-expense.json's own Finance API call).\nconst input = $('Validate WhatsApp Event Input').item.json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: input.workflowExecutionId,\n    workflowName: '03-whatsapp-finance-entry',\n    channel: 'whatsapp',\n    externalUserId: input.customerWhatsappId,\n    externalMessageId: input.messageId,\n    rawText: input.messageText,\n    // WhatsApp media messages are not yet extracted as attachments -- the\n    // Gateway itself does not resolve WhatsApp media IDs to downloadable\n    // URLs (a separate, authenticated Graph API call it does not currently\n    // make). Always [] until that capability exists -- see this workflow's\n    // documentation, \"Known Limitations\".\n    attachments: [],\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Call Finance Intent Router",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "onError": "continueRegularOutput",
+      "position": [880, -100],
+      "parameters": {
+        "workflowId": "FinanceIntentRouterWf01"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Build WhatsApp Reply Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -100],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// \"Call Finance Intent Router\" has onError: continueRegularOutput, so a\n// failed call surfaces as $json.error here rather than crashing -- same\n// pattern as 01-finance-inbox-entry.json's \"Format Slack Reply\" reading\n// $json.error after \"Call Finance Intent Router\". This node never inspects\n// intent/category/amount/any Finance-specific field -- its only job is\n// translating the Response Contract's `message` into\n// 02-whatsapp-outbound-send.json's own input contract, with a safe\n// fallback when the Router call itself failed or `message` is missing.\nconst input = $('Validate WhatsApp Event Input').item.json;\nconst result = $json || {};\n\nlet text;\nif (result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  text = \"Sorry, I couldn't process that just now. Please try again in a moment.\";\n  console.log(`[Build WhatsApp Reply Input] Finance Intent Router call failed: ${message}`);\n} else if (typeof result.message === 'string' && result.message.trim()) {\n  text = result.message;\n} else {\n  text = \"Sorry, I couldn't process that just now. Please try again in a moment.\";\n}\n\nreturn [{\n  json: {\n    to: input.customerWhatsappId,\n    messageType: 'text',\n    text,\n    contextTag: 'finance-inbox-response',\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Call WhatsApp Outbound Send",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "onError": "continueRegularOutput",
+      "position": [1320, -100],
+      "parameters": {
+        "workflowId": "WhatsappOutboundSendWf01"
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Finance Reply Sent",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1540, -100],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [[{ "node": "Validate WhatsApp Event Input", "type": "main", "index": 0 }]]
+    },
+    "Validate WhatsApp Event Input": {
+      "main": [[{ "node": "WhatsApp Event Valid?", "type": "main", "index": 0 }]]
+    },
+    "WhatsApp Event Valid?": {
+      "main": [
+        [{ "node": "Build Finance Inbox Request", "type": "main", "index": 0 }],
+        [{ "node": "Build Invalid Event Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Finance Inbox Request": {
+      "main": [[{ "node": "Call Finance Intent Router", "type": "main", "index": 0 }]]
+    },
+    "Call Finance Intent Router": {
+      "main": [[{ "node": "Build WhatsApp Reply Input", "type": "main", "index": 0 }]]
+    },
+    "Build WhatsApp Reply Input": {
+      "main": [[{ "node": "Call WhatsApp Outbound Send", "type": "main", "index": 0 }]]
+    },
+    "Call WhatsApp Outbound Send": {
+      "main": [[{ "node": "Finance Reply Sent", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

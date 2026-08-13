@@ -1,6 +1,6 @@
 # WhatsApp Gateway Architecture
 
-Status: Active (test-number phase — see Production-Number Migration Plan below)
+Status: Active (test-number phase — see Production-Number Migration Plan below). Since Phase 3B (ADR-0013), non-test messages are dispatched to `workflows/finance/03-whatsapp-finance-entry.json` rather than dead-ending — see the diagram below.
 
 ---
 
@@ -26,8 +26,15 @@ n8n: 01-whatsapp-gateway-webhook.json
 Normalized internal event (whatsappBusinessAccountId, phoneNumberId,
 customerWhatsappId, messageId, messageText, ...)
       |
-      +-- non-test message --> Ready For AI / CRM Processing (NoOp --
-      |                         future milestone plugs in here)
+      +-- non-test message --> Ready For AI / CRM Processing (NoOp, kept as
+      |                         a named marker) --> Call WhatsApp Finance
+      |                         Entry (Execute Workflow)
+      |                                 |
+      |                                 v
+      |                   n8n: workflows/finance/03-whatsapp-finance-entry.json
+      |                   (Finance Inbox Request --> Finance Intent Router
+      |                    --> ... --> Response --> WhatsApp reply, via
+      |                    02-whatsapp-outbound-send.json -- see ADR-0013)
       |
       +-- exact text "eyan-test" --> Build Test Reply Input
                                             |
@@ -42,7 +49,7 @@ customerWhatsappId, messageId, messageText, ...)
                                     WhatsApp customer
 ```
 
-Both workflows live under `workflows/integrations/` (not `workflows/crm/` or `workflows/finance/`) — this is a channel gateway, not a business-domain workflow; CRM/Finance/future domains are expected to call `02-whatsapp-outbound-send.json` themselves once they need to send WhatsApp messages, the same way they'd call any other integrations-domain capability.
+`01-whatsapp-gateway-webhook.json` and `02-whatsapp-outbound-send.json` live under `workflows/integrations/` (not `workflows/crm/` or `workflows/finance/`) — this is a channel gateway, not a business-domain workflow; CRM/Finance/future domains are expected to call `02-whatsapp-outbound-send.json` themselves once they need to send WhatsApp messages, the same way they'd call any other integrations-domain capability. `workflows/finance/03-whatsapp-finance-entry.json` is the first such domain-owned consumer (Phase 3B, ADR-0013) — it lives in `workflows/finance/`, not here, since it is Finance-domain logic (contract mapping, Router dispatch), not channel-gateway logic.
 
 ---
 
@@ -105,6 +112,8 @@ Not started — this integration currently only targets Meta's test number. When
 # Related Documentation
 
 - `docs/adrs/ADR-0010-whatsapp-outbound-messaging.md`
+- `docs/adrs/ADR-0013-whatsapp-finance-entry-adapter.md` (the Finance-domain plug-in described above)
 - `docs/workflows/01-whatsapp-gateway-webhook.md`
 - `docs/workflows/02-whatsapp-outbound-send.md`
+- `docs/workflows/03-whatsapp-finance-entry.md`
 - `docs/security/credential-management.md`

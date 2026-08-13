@@ -273,6 +273,25 @@
       "typeVersion": 1,
       "position": [2000, 160],
       "parameters": {}
+    },
+    {
+      "id": "n18",
+      "name": "Call WhatsApp Finance Entry",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "onError": "continueRegularOutput",
+      "position": [1560, -40],
+      "parameters": {
+        "workflowId": "FinanceWhatsAppEntryWf01"
+      }
+    },
+    {
+      "id": "n19",
+      "name": "Finance Entry Dispatched",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1780, -40],
+      "parameters": {}
     }
   ],
   "connections": {
@@ -323,6 +342,12 @@
     },
     "Call Outbound Send - Test Reply": {
       "main": [[{ "node": "Test Reply Sent", "type": "main", "index": 0 }]]
+    },
+    "Ready For AI / CRM Processing": {
+      "main": [[{ "node": "Call WhatsApp Finance Entry", "type": "main", "index": 0 }]]
+    },
+    "Call WhatsApp Finance Entry": {
+      "main": [[{ "node": "Finance Entry Dispatched", "type": "main", "index": 0 }]]
     }
   },
   "active": false,

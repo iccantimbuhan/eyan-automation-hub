@@ -137,5 +137,36 @@ function runNormalize(parsedJson, executionId) {
   check("contextTag marks this as the gateway test-reply path", r.contextTag === "gateway-test-reply", r);
 }
 
+// ---- STRUCTURAL: "Ready For AI / CRM Processing" now plugs into the
+// WhatsApp Finance Entry adapter (Phase 3B). This was previously a
+// dead-end NoOp ("future milestone plugs in here", per
+// docs/workflows/whatsapp-gateway-architecture.md) -- this test locks in
+// that wiring without touching any pre-existing node's behavior. ----
+{
+  const financeEntryNode = wf.nodes.find((n) => n.name === "Call WhatsApp Finance Entry");
+  check("a Call WhatsApp Finance Entry node exists", !!financeEntryNode, financeEntryNode);
+  check(
+    "it is an executeWorkflow node targeting FinanceWhatsAppEntryWf01",
+    financeEntryNode && financeEntryNode.type === "n8n-nodes-base.executeWorkflow" && financeEntryNode.parameters.workflowId === "FinanceWhatsAppEntryWf01",
+    financeEntryNode
+  );
+  check(
+    "'Ready For AI / CRM Processing' now connects to it (the documented extension point)",
+    JSON.stringify(wf.connections["Ready For AI / CRM Processing"]) === JSON.stringify({ main: [[{ node: "Call WhatsApp Finance Entry", type: "main", index: 0 }]] }),
+    wf.connections["Ready For AI / CRM Processing"]
+  );
+  check(
+    "the pre-existing 'eyan-test' keyword-reply branch is untouched",
+    JSON.stringify(wf.connections["Is Test Keyword Message?"]) ===
+      JSON.stringify({
+        main: [
+          [{ node: "Build Test Reply Input", type: "main", index: 0 }],
+          [{ node: "Ready For AI / CRM Processing", type: "main", index: 0 }],
+        ],
+      }),
+    wf.connections["Is Test Keyword Message?"]
+  );
+}
+
 console.log(`\n${pass} passed, ${fail} failed (${pass + fail} total assertions)`);
 process.exit(fail > 0 ? 1 : 0);
