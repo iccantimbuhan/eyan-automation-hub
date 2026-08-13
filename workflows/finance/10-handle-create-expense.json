@@ -1,0 +1,357 @@
+{
+  "id": "FinanceHandlerCreateExpenseWf01",
+  "name": "Finance - 10 - Handle Create Expense",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Validate Handler Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Structural + Handler-specific validation of the Finance Inbox Request\n// Contract this workflow receives from the Intent Router (ADR-0008 Decision\n// 1, docs/workflows/finance-inbox-contract.md). The Router already did\n// contract-shape validation before dispatching here -- this re-validates\n// defensively (this workflow could also be called directly by a future\n// UPLOAD_RECEIPT handler reusing this same write path, per ADR-0008\n// Decision 3's Handler ID table) and adds ONE Handler-specific rule the\n// shared contract does not: source.externalUserId is REQUIRED (not just\n// nullable) by the Eyan Finance Service API's createExpenseAutomatedValidator\n// (eyan-ai-platform finance-automation.validator.ts) -- without it, this\n// Handler cannot safely attribute an expense to anyone, so it fails closed\n// here rather than sending a request the Finance API would reject anyway.\nconst req = $json || {};\nconst reasons = [];\n\nfunction requireNonEmptyString(field) {\n  if (typeof req[field] !== 'string' || req[field].trim().length === 0) {\n    reasons.push(`Missing/empty required field: ${field}.`);\n  }\n}\n\nrequireNonEmptyString('contractVersion');\nrequireNonEmptyString('workflowExecutionId');\nrequireNonEmptyString('workflowName');\nrequireNonEmptyString('channel');\n\nif (typeof req.rawText !== 'string') {\n  reasons.push('rawText must be a string (may be empty).');\n}\n\nif (!Array.isArray(req.attachments)) {\n  reasons.push('attachments must be an array.');\n}\n\n// Handler-specific -- see comment above. The shared Inbox Contract allows\n// externalUserId to be null; this Handler cannot.\nif (typeof req.externalUserId !== 'string' || req.externalUserId.trim().length === 0) {\n  reasons.push('Missing externalUserId -- cannot attribute this expense to a sender.');\n}\n\nreturn [{\n  json: {\n    valid: reasons.length === 0,\n    reason: reasons.join(' '),\n    contractVersion: req.contractVersion,\n    workflowExecutionId: req.workflowExecutionId,\n    workflowName: req.workflowName,\n    channel: req.channel,\n    externalUserId: req.externalUserId ?? null,\n    externalMessageId: req.externalMessageId ?? null,\n    rawText: typeof req.rawText === 'string' ? req.rawText : '',\n    attachments: Array.isArray(req.attachments) ? req.attachments : [],\n    startedAt: Date.now(),\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Handler Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Build Invalid Input Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Orchestration-layer rejection (malformed/incomplete envelope) -- not a\n// Finance business decision (e.g. not \"ambiguous expense\"), so this never\n// asks a clarifying question -- same posture as the Router's own\n// \"Build Contract Violation Response\" (ADR-0008 Decision 2). intent stays\n// CREATE_EXPENSE (not UNRECOGNIZED): the Router already classified this\n// correctly before dispatching here, and ADR-0008 Decision 2 requires\n// intent to be present even on error, for audit/logging.\nconst v = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId || 'unknown',\n    status: 'error',\n    intent: 'CREATE_EXPENSE',\n    message: \"Sorry, I couldn't process that message. Please try again.\",\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Prepare Expense Extraction Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Builds the Ollama /api/chat request body for expense-field extraction.\n// The Router deliberately extracts nothing beyond {intent, confidence}\n// (ADR-0008 Notes amendment) -- amount/category/paymentMethod/date/\n// description/isRecurring extraction is entirely this Handler's job, the first place\n// in the AI Finance Inbox chain that does it.\n//\n// format: 'json' is Ollama's own native JSON-mode flag -- NOT n8n's\n// LangChain Agent/outputParserStructured stack the Finance Intent Router\n// uses. See docs/adrs/ADR-0011-finance-handler-ai-extraction-approach.md:\n// that stack wraps structured output in a format_final_json_response\n// tool-call envelope this n8n/LangChain version does not unwrap (0%\n// structured-output success rate across both locally available\n// tool-capable models, docs/adrs/ADR-0009-finance-intent-router-model-selection.md).\n// This node instead calls Ollama's REST API directly and \"Validate Expense\n// Extraction\" parses its plain JSON response text -- the same\n// direct-httpRequest-plus-manual-parse pattern already established in\n// workflows/crm/03-ai-qualification.json's \"Call AI Core\"/\"Map AI Core\n// Result\" pair, applied here against local Ollama instead of a remote AI\n// Core capability, since no Finance extraction capability exists in AI Core.\n//\n// model is hardcoded to gemma3:4b -- this Handler's own production-capacity\n// finding on this VPS (~11 GiB RAM + 8 GiB swap), independent of the\n// Router's mistral:7b choice (ADR-0009 is a Router-specific evaluation, not\n// binding on this Handler -- see ADR-0011's Addendum). gemma3:4b lacks\n// Ollama \"tools\" capability, which is exactly why ADR-0009 excludes it for\n// the Router's ToolsAgent-based Agent node -- that exclusion does not apply\n// here, since this Handler never uses an Agent node, only a direct\n// httpRequest call against Ollama's native /api/chat JSON mode (ADR-0011\n// Decision, pattern 2), which gemma3:4b handles correctly. NOT read from\n// $env.OLLAMA_MODEL, which is a different, CRM-era config value (currently\n// qwen2.5-coder:7b, unused by any workflow since Sprint 5's AI Core\n// migration) that must not be silently inherited by an unrelated domain.\n//\n// options.temperature: 0 and options.num_ctx: 2048 are both production\n// test findings on this VPS: temperature 0 for deterministic extraction,\n// and num_ctx 2048 substantially outperforms Ollama's 4096 default for\n// this workload (a single short message, not a large context need).\n//\n// today: no message-received timestamp survives to this Handler -- the\n// Finance Inbox Contract deliberately excludes channel-specific timestamps\n// (e.g. Slack's receivedAt) from the Router payload (ADR-0008 Decision 4's\n// \"no channel-metadata bag\" rule). This workflow's own execution time\n// resolves relative dates (\"today\", \"yesterday\") and is the fallback when\n// no date is mentioned at all -- an ordinary chat-expense-logger\n// convention, NOT the same class of \"invented data\" the amount/category\n// clarification rules exist to prevent (those guard against guessing a\n// fact the user disagrees with; defaulting an undated casual mention to\n// today is the ordinary reading of the message).\nconst input = $('Validate Handler Input').item.json;\nconst today = new Date().toISOString().slice(0, 10);\n\nconst attachmentNote = (input.attachments && input.attachments.length)\n  ? `\\n[This message includes ${input.attachments.length} attachment(s).]`\n  : '';\n\nconst systemPrompt = `You are the Finance CREATE_EXPENSE Handler's expense-field extractor for the AI Finance Inbox. Your ONLY job is to read the user's raw message and extract the fields needed to log an expense. Intent classification is already done (this message was already routed here as CREATE_EXPENSE) -- you do not classify intent, do not answer questions, and have no access to any Finance data.\n\nExtract exactly these fields:\n\n- amount: the numeric amount spent, as a plain number (e.g. 12.50). null if no amount is mentioned or it cannot be determined -- NEVER invent or guess a number.\n- category: EXACTLY one of these values: HOUSING, FOOD, UTILITIES, TRANSPORTATION, SHOPPING, MEDICAL, CREDIT_CARD, SAVINGS, TAX, OTHERS. No other value is valid -- for example, \"Food & Drink\" is NOT a valid category; the closest real value is FOOD. null if the category cannot be confidently determined -- NEVER guess between two plausible categories, and NEVER invent a category value that is not in this exact list.\n- paymentMethod: EXACTLY one of these values, or null if not mentioned: CASH, CREDIT_CARD, DEBIT_CARD, BANK_TRANSFER, OTHER. No other value is valid -- for example, \"Imagin Card\" is NOT a valid paymentMethod. Named cards and payment instruments (\"Imagin\", \"Visa\", \"Mastercard\", \"Amex\", \"Revolut\", or similar) are not paymentMethod values themselves -- when the message names one of these to describe how something was paid, map it to CREDIT_CARD, unless the message specifically says it is a debit card, in which case use DEBIT_CARD.\n- date: the date the expense occurred, as YYYY-MM-DD. \"today\" is NOT a valid date output -- always resolve it to an actual calendar date. If the message implies today (or gives no date at all), use ${today}. If it says \"yesterday\", use the day before ${today}. Use your best resolution of any other relative or explicit date mentioned.\n- description: a short (under 100 characters) plain-text description of what the expense was for, drawing on the message's own wording (e.g. merchant, item). null if the message gives nothing beyond the amount.\n- isRecurring: true ONLY if the message clearly and explicitly describes a repeating or recurring expense (e.g. \"my monthly Netflix subscription\", \"rent, same as every month\", \"this happens every month\"). false if the message describes a one-time expense, or does not mention recurrence at all. NEVER guess true from an ambiguous or unstated case -- default to false.\n\nNote: \"CREDIT_CARD\" appears as a value in BOTH category and paymentMethod -- they are two separate fields. A message about paying a credit card BILL is category CREDIT_CARD; a message about paying an unrelated expense BY credit card is paymentMethod CREDIT_CARD (with category describing what was bought).\n\nOutput rules -- follow every one of these exactly:\n- Never invent an amount. If it cannot be determined, use null.\n- Never invent a category. If it cannot be confidently determined, use null -- do not pick the closest guess.\n- Never output markdown, code fences, or any text other than the JSON object.\n- Return exactly one JSON object with exactly these six keys (amount, category, paymentMethod, date, description, isRecurring) and no other text, no explanation.`;\n\nreturn [{\n  json: {\n    ...input,\n    today,\n    ollamaRequestBody: {\n      model: 'gemma3:4b',\n      format: 'json',\n      stream: false,\n      options: {\n        temperature: 0,\n        num_ctx: 2048,\n      },\n      messages: [\n        { role: 'system', content: systemPrompt },\n        { role: 'user', content: `Message: ${input.rawText}${attachmentNote}` },\n      ],\n    },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Call Ollama - Extract Expense",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OLLAMA_BASE_URL }}/api/chat",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ollamaRequestBody) }}",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Validate Expense Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Distinguishes the failure classes this Handler's Failure Handling scope\n// requires kept separate: (1) the Ollama call itself failed -- network/\n// timeout, surfaced via \"Call Ollama - Extract Expense\"'s\n// onError: continueRegularOutput as $json.error, same pattern as the\n// Router's own \"Validate Agent Output\"; (2) Ollama responded but the\n// content isn't valid/parseable JSON at all -- also a system/model\n// reliability failure, not a user-facing ambiguity; (3) Ollama responded\n// with valid JSON but couldn't confidently determine amount and/or\n// category -- THIS is the only case that becomes a clarifying question,\n// never (1) or (2), which become a safe generic error instead.\nconst EXPENSE_CATEGORIES = ['HOUSING', 'FOOD', 'UTILITIES', 'TRANSPORTATION', 'SHOPPING', 'MEDICAL', 'CREDIT_CARD', 'SAVINGS', 'TAX', 'OTHERS'];\nconst PAYMENT_METHODS = ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'OTHER'];\n\nconst context = $('Prepare Expense Extraction Input').item.json;\nconst today = context.today;\n\nfunction fail(reasonCode) {\n  return [{\n    json: {\n      ...context,\n      extractionOutcome: 'extraction_failed',\n      reasonCode,\n    },\n  }];\n}\n\nif ($json && $json.error) {\n  const message = String(($json.error && $json.error.message) || $json.error);\n  console.log(`[Validate Expense Extraction] Ollama call failed: ${message}`);\n  return fail('ollama_call_failed');\n}\n\nlet extracted;\ntry {\n  const content = $json && $json.message && $json.message.content;\n  extracted = typeof content === 'string' ? JSON.parse(content) : null;\n} catch (error) {\n  extracted = null;\n}\n\nif (!extracted || typeof extracted !== 'object') {\n  console.log('[Validate Expense Extraction] Ollama response was not parseable JSON.');\n  return fail('unparseable_output');\n}\n\n// amount -- accept a number or a numeric string, never invent one\nconst rawAmount = extracted.amount;\nconst amount = (typeof rawAmount === 'number' && Number.isFinite(rawAmount))\n  ? rawAmount\n  : (typeof rawAmount === 'string' && rawAmount.trim() !== '' && Number.isFinite(Number(rawAmount)))\n    ? Number(rawAmount)\n    : null;\nconst amountValid = amount !== null && amount > 0;\n\n// category -- must be a real ExpenseCategory value, never guessed\nconst category = (typeof extracted.category === 'string' && EXPENSE_CATEGORIES.includes(extracted.category))\n  ? extracted.category\n  : null;\n\n// paymentMethod -- optional; an invalid/unrecognized value is treated as\n// \"not provided\", never blocks the expense (the Finance API itself treats\n// this field as optional)\nconst paymentMethod = (typeof extracted.paymentMethod === 'string' && PAYMENT_METHODS.includes(extracted.paymentMethod))\n  ? extracted.paymentMethod\n  : undefined;\n\n// date -- defaults to today when absent/invalid; see \"Prepare Expense\n// Extraction Input\"'s comment on why this default is not the same class of\n// \"invented data\" as amount/category.\nconst dateValid = typeof extracted.date === 'string' && /^\\d{4}-\\d{2}-\\d{2}$/.test(extracted.date) && !Number.isNaN(Date.parse(extracted.date));\nconst date = dateValid ? extracted.date : today;\n\nconst description = (typeof extracted.description === 'string' && extracted.description.trim())\n  ? extracted.description.trim().slice(0, 500)\n  : undefined;\n\n// isRecurring -- optional, defaults to false. Only a literal boolean true\n// is honored; anything else (missing, null, a non-boolean value) is\n// treated as false, never blocking the expense and never guessed true --\n// matches the extraction prompt's own \"NEVER guess true from an ambiguous\n// or unstated case\" instruction. This field is genuinely supported by the\n// Finance API (CreateExpenseAutomatedDto.isRecurring,\n// FinanceExpenseService.create() creates a real RecurringTemplate when\n// true) -- v1 of this Handler never extracted or forwarded it even though\n// the backend already supported it; v2 (this file, and\n// expense-extraction.v2.md) closes that gap.\nconst isRecurring = extracted.isRecurring === true;\n\nif (!amountValid || !category) {\n  const missingField = !amountValid ? 'amount' : 'category';\n  return [{\n    json: {\n      ...context,\n      extractionOutcome: 'needs_clarification',\n      missingField,\n      amount: amountValid ? amount : null,\n      category,\n      paymentMethod,\n      date,\n      description,\n      isRecurring,\n    },\n  }];\n}\n\nreturn [{\n  json: {\n    ...context,\n    extractionOutcome: 'valid',\n    amount,\n    category,\n    paymentMethod,\n    date,\n    description,\n    isRecurring,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Expense Data Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.extractionOutcome }}",
+              "rightValue": "valid",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Build Extraction Failure Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Converges both non-success extraction outcomes into the Response\n// Contract (ADR-0008 Decision 2) -- kept as one node, not two branches,\n// since both paths build the same shape with a different status/message;\n// avoids an unnecessary extra IF node for two mutually exclusive Code\n// paths already distinguished by \"Validate Expense Extraction\".\nconst v = $json;\n\nif (v.extractionOutcome === 'needs_clarification') {\n  const question = v.missingField === 'amount'\n    ? 'How much did you spend?'\n    : 'What category should I use for this expense -- one of: HOUSING, FOOD, UTILITIES, TRANSPORTATION, SHOPPING, MEDICAL, CREDIT_CARD, SAVINGS, TAX, OTHERS?';\n\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: v.workflowExecutionId,\n      status: 'clarify',\n      intent: 'CREATE_EXPENSE',\n      message: question,\n      data: null,\n      clarifyingQuestion: question,\n    },\n  }];\n}\n\n// extractionOutcome === 'extraction_failed' -- a system/model reliability\n// failure (Ollama unreachable, or its output wasn't parseable JSON at\n// all), never exposed in detail to the user -- no Ollama internals, no\n// stack traces, matching this workflow's Failure Handling scope.\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId,\n    status: 'error',\n    intent: 'CREATE_EXPENSE',\n    message: 'Sorry, I couldn\\'t read the details of that expense. Could you try rephrasing it, e.g. \"spent $12.50 on lunch\"?',\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Build Finance API Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Assembles the Eyan Finance Service API's CreateExpenseAutomatedDto\n// exactly (eyan-ai-platform backend/src/dto/finance-automation.dto.ts,\n// finance-automation.validator.ts, ADR-0024 Decisions 2 & 6). amount is\n// sent as a STRING, not a number -- finance-automation.validator.ts\n// validates it with isFloat() but never .toFloat()s it, matching\n// finance-expense.validator.ts's own comment: \"money stays a string all\n// the way to Prisma's Decimal field.\" workflowExecutionId is the value\n// this Handler RECEIVED from the Router, forwarded unchanged -- never\n// $execution.id (ADR-0008 Decision 4 / finance-inbox-contract.md's\n// \"Generating workflowExecutionId\" section: regenerating it at any hop\n// breaks the Finance API's idempotency check, eyan-ai-platform ADR-0024\n// Decision 5). workflowName identifies THIS workflow, matching the\n// pattern workflows/crm/03-ai-qualification.json's \"Call AI Core\" already\n// established (each hop names itself on its own outbound call; only\n// workflowExecutionId is the one constant thread).\nconst v = $json;\n\nconst body = {\n  contractVersion: v.contractVersion,\n  workflowExecutionId: v.workflowExecutionId,\n  workflowName: '10-handle-create-expense',\n  date: v.date,\n  amount: String(v.amount),\n  category: v.category,\n  source: {\n    channel: v.channel,\n    externalUserId: v.externalUserId,\n  },\n  intent: 'CREATE_EXPENSE',\n};\n\nif (v.paymentMethod) body.paymentMethod = v.paymentMethod;\nif (v.description) body.description = v.description;\nif (v.isRecurring === true) body.isRecurring = true;\nif (v.externalMessageId) body.source.externalMessageId = v.externalMessageId;\nif (typeof v.startedAt === 'number') body.durationMs = Date.now() - v.startedAt;\n\nreturn [{ json: { financeApiRequestBody: body, workflowExecutionId: v.workflowExecutionId } }];\n"
+      }
+    },
+    {
+      "id": "n11",
+      "name": "Call Finance Service - Create Expense",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [
+        1760,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/finance/service/expenses",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.financeApiRequestBody) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n12",
+      "name": "Validate Finance API Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Maps the Eyan Finance Service API's response onto the Response Contract\n// (ADR-0008 Decision 2). Success shape: ApiResponse.success wraps as\n// {success:true, message, data} (eyan-ai-platform\n// backend/src/utils/api-response.ts). data is either\n// {replayed:true, workflowExecutionId} (a safe replay -- ADR-0024 Decision\n// 5's known gap: a replay can't re-return the original expense, only\n// confirm it already happened) or {replayed:false, id, date, amount,\n// category, paymentMethod, description, ...} (finance-expense.mapper.ts's\n// ExpenseResponseDto). Validation failures (400, express-validator) and\n// auth/config failures (401/500) share the {success:false, ...} shape\n// (validation.middleware.ts / service-auth.middleware.ts) -- never exposed\n// to the user verbatim: no stack traces, no HTTP internals, no raw\n// error/validator text, matching this workflow's Failure Handling scope.\nconst context = $('Build Finance API Request').item.json;\nconst result = $json;\n\nfunction errorResponse(message) {\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: context.workflowExecutionId,\n      status: 'error',\n      intent: 'CREATE_EXPENSE',\n      message,\n      data: null,\n      clarifyingQuestion: null,\n    },\n  }];\n}\n\nif (result && result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  console.log(`[Validate Finance API Response] Finance API call failed: ${message}`);\n  return errorResponse(\"Sorry, I couldn't save that expense right now. Please try again in a moment.\");\n}\n\nif (!result || result.success !== true || !result.data) {\n  const detail = result && Array.isArray(result.errors) ? JSON.stringify(result.errors) : JSON.stringify(result);\n  console.log(`[Validate Finance API Response] Finance API rejected the request: ${detail}`);\n  return errorResponse(\"Sorry, that expense couldn't be saved -- please check the amount and category and try again.\");\n}\n\nconst data = result.data;\n\nif (data.replayed) {\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: context.workflowExecutionId,\n      status: 'success',\n      intent: 'CREATE_EXPENSE',\n      message: 'This expense was already logged -- no duplicate created.',\n      data: { replayed: true },\n      clarifyingQuestion: null,\n    },\n  }];\n}\n\nconst amountText = typeof data.amount === 'string' ? data.amount : String(data.amount);\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: context.workflowExecutionId,\n    status: 'success',\n    intent: 'CREATE_EXPENSE',\n    message: `Logged $${amountText} to ${data.category}.`,\n    data: {\n      id: data.id,\n      date: data.date,\n      amount: data.amount,\n      category: data.category,\n      paymentMethod: data.paymentMethod,\n      description: data.description,\n      isRecurring: data.isRecurring,\n    },\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Validate Handler Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Handler Input": {
+      "main": [
+        [
+          {
+            "node": "Handler Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handler Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Expense Extraction Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Invalid Input Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Expense Extraction Input": {
+      "main": [
+        [
+          {
+            "node": "Call Ollama - Extract Expense",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Ollama - Extract Expense": {
+      "main": [
+        [
+          {
+            "node": "Validate Expense Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Expense Extraction": {
+      "main": [
+        [
+          {
+            "node": "Expense Data Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expense Data Valid?": {
+      "main": [
+        [
+          {
+            "node": "Build Finance API Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Extraction Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Finance API Request": {
+      "main": [
+        [
+          {
+            "node": "Call Finance Service - Create Expense",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Finance Service - Create Expense": {
+      "main": [
+        [
+          {
+            "node": "Validate Finance API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
