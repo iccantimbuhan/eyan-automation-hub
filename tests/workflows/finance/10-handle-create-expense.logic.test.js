@@ -142,6 +142,7 @@ function runPrepareExtraction(handlerInput) {
       if (name !== "Validate Handler Input") throw new Error("unexpected node ref: " + name);
       return { item: { json: handlerInput } };
     },
+    Array,
     Date,
     console,
     result: undefined,
@@ -156,27 +157,28 @@ const VALIDATED_INPUT = {
   startedAt: 1000000,
 };
 
-// 5. Builds a well-formed Ollama request: correct model, native JSON mode,
-// user message carries the raw text, today's date is embedded for
-// relative-date resolution.
+// 5. Builds a well-formed AI Core `expense-extraction` capability invoke()
+// request: {input, context} envelope. Model/provider/prompt resolution is
+// now entirely AI Core's AiRoutingPolicy's job (see
+// docs/adrs/ADR-0014-finance-ai-core-migration.md), not this node's.
 {
   const r = runPrepareExtraction(VALIDATED_INPUT);
-  check("model is gemma3:4b (production-capacity finding, see ADR-0011 Addendum, not $env.OLLAMA_MODEL)", r.ollamaRequestBody.model === "gemma3:4b", r);
-  check("format is Ollama's native json mode", r.ollamaRequestBody.format === "json", r);
-  check("not streamed", r.ollamaRequestBody.stream === false, r);
-  check("temperature is 0 for deterministic extraction", r.ollamaRequestBody.options.temperature === 0, r);
-  check("num_ctx is 2048 (production-tested value, preferable to the 4096 default for this workload)", r.ollamaRequestBody.options.num_ctx === 2048, r);
-  check("system message present", typeof r.ollamaRequestBody.messages[0].content === "string" && r.ollamaRequestBody.messages[0].content.length > 0, r);
-  check("user message carries rawText", r.ollamaRequestBody.messages[1].content.includes("spent $12.50 on lunch"), r);
-  check("today is a real YYYY-MM-DD date embedded in the system prompt", r.ollamaRequestBody.messages[0].content.includes(r.today), r);
+  check("input.message carries rawText", r.aiCoreRequestBody.input.message === "spent $12.50 on lunch", r);
+  check("input.attachmentCount is 0 for a text-only message", r.aiCoreRequestBody.input.attachmentCount === 0, r);
+  check("input.today is a real YYYY-MM-DD date, for the prompt's {{today}} placeholder", /^\d{4}-\d{2}-\d{2}$/.test(r.aiCoreRequestBody.input.today), r);
+  check("context.expectJson is true (required for AI Core to attempt JSON parsing at all)", r.aiCoreRequestBody.context.expectJson === true, r);
+  check("context.workflowName identifies this Handler", r.aiCoreRequestBody.context.workflowName === "10-handle-create-expense", r);
+  check("context.workflowExecutionId is forwarded from the Handler input", r.aiCoreRequestBody.context.workflowExecutionId === "exec-1", r);
+  check("top-level today is still present (Validate Expense Extraction's date-default fallback reads it)", r.today === r.aiCoreRequestBody.input.today, r);
   check("startedAt survives forward (needed later for durationMs)", r.startedAt === 1000000, r);
 }
 
-// 6. Attachment-only message still produces a usable prompt (attachment
-// count is noted, never silently dropped).
+// 6. Attachment-only message still notes the attachment count, never
+// silently dropped.
 {
   const r = runPrepareExtraction({ ...VALIDATED_INPUT, rawText: "", attachments: [{ url: "https://x", mimeType: "image/png", name: "r.png" }] });
-  check("attachment count is noted in the user message", r.ollamaRequestBody.messages[1].content.includes("1 attachment"), r);
+  check("attachment count is carried in input.attachmentCount", r.aiCoreRequestBody.input.attachmentCount === 1, r);
+  check("input.message is the empty rawText, not fabricated", r.aiCoreRequestBody.input.message === "", r);
 }
 
 // ---- Validate Expense Extraction ----
@@ -196,16 +198,19 @@ function runValidateExtraction({ ollamaResult, context }) {
   return sandbox.result[0].json;
 }
 
-const EXTRACTION_CONTEXT = { ...VALIDATED_INPUT, today: "2026-08-10", ollamaRequestBody: {} };
+const EXTRACTION_CONTEXT = { ...VALIDATED_INPUT, today: "2026-08-10", aiCoreRequestBody: {} };
 
-function ollamaChatResponse(obj) {
-  return { message: { role: "assistant", content: JSON.stringify(obj) } };
+// AI Core's already-parsed capability-invoke response envelope --
+// {data: {outcome, outputJson, ...}} -- replaces the old raw Ollama
+// {message: {content: "..."}} shape this Handler used to re-parse itself.
+function aiCoreResponse(obj) {
+  return { data: { outcome: "VALID", outputJson: obj } };
 }
 
 // 7. Valid extraction (amount + category present) -> extractionOutcome: valid
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", paymentMethod: null, date: "2026-08-10", description: "lunch" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", paymentMethod: null, date: "2026-08-10", description: "lunch" }),
     context: EXTRACTION_CONTEXT,
   });
   check("valid extraction reaches 'valid' outcome", r.extractionOutcome === "valid", r);
@@ -221,7 +226,7 @@ function ollamaChatResponse(obj) {
 // expense (unlike amount/category, which do).
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("extraction with no description at all is still 'valid'", r.extractionOutcome === "valid", r);
@@ -232,7 +237,7 @@ function ollamaChatResponse(obj) {
 // emit a bare number)
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: "12.50", category: "FOOD", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: "12.50", category: "FOOD", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("numeric-string amount is accepted", r.amount === 12.5 && r.extractionOutcome === "valid", r);
@@ -243,7 +248,7 @@ function ollamaChatResponse(obj) {
 // not invented).
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "GROCERIES", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "GROCERIES", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("out-of-enum category is rejected, not passed through", r.category === null, r);
@@ -257,7 +262,7 @@ function ollamaChatResponse(obj) {
 // hallucinating an invalid value).
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: null, date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: null, date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("literally missing category -> needs_clarification", r.extractionOutcome === "needs_clarification" && r.missingField === "category", r);
@@ -269,14 +274,14 @@ function ollamaChatResponse(obj) {
 // specific wrong date.
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", date: null }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", date: null }),
     context: EXTRACTION_CONTEXT,
   });
   check("missing date defaults to today, does not block the expense", r.date === "2026-08-10" && r.extractionOutcome === "valid", r);
 }
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", date: "not-a-date" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", date: "not-a-date" }),
     context: EXTRACTION_CONTEXT,
   });
   check("unparseable date defaults to today rather than being sent raw", r.date === "2026-08-10", r);
@@ -285,7 +290,7 @@ function ollamaChatResponse(obj) {
 // 11. Missing amount -> clarify, amount is NEVER invented/defaulted
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: null, category: "FOOD", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: null, category: "FOOD", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("missing amount -> needs_clarification", r.extractionOutcome === "needs_clarification", r);
@@ -296,7 +301,7 @@ function ollamaChatResponse(obj) {
   // A zero or negative amount is just as invalid as missing -- never
   // silently coerced to a positive guess.
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 0, category: "FOOD", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 0, category: "FOOD", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("zero amount is treated as missing, not a valid expense", r.extractionOutcome === "needs_clarification" && r.missingField === "amount", r);
@@ -309,7 +314,7 @@ function ollamaChatResponse(obj) {
 // Number.isFinite correctly rejects).
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: "twelve dollars", category: "FOOD", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: "twelve dollars", category: "FOOD", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("non-numeric string amount -> needs_clarification, not NaN/coerced", r.extractionOutcome === "needs_clarification" && r.missingField === "amount", r);
@@ -322,36 +327,46 @@ function ollamaChatResponse(obj) {
 // isolated field rule.
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: null, category: null, date: "2026-08-10", description: "lunch" }),
+    ollamaResult: aiCoreResponse({ amount: null, category: null, date: "2026-08-10", description: "lunch" }),
     context: { ...EXTRACTION_CONTEXT, rawText: "spent some money on lunch" },
   });
   check("ambiguous message with no determinable amount asks for clarification, never guesses one", r.extractionOutcome === "needs_clarification" && r.missingField === "amount", r);
 }
 
-// 13. Invalid AI output: unparseable JSON -> extraction_failed (a system
-// failure, not a user-facing clarify), never throws.
+// 13. Invalid AI Core output: a non-VALID outcome (AI Core already retried
+// internally per its own AiRoutingPolicy before giving up) -> extraction_failed
+// (a system failure, not a user-facing clarify), never throws.
 {
   const r = runValidateExtraction({
-    ollamaResult: { message: { role: "assistant", content: "not valid json at all" } },
+    ollamaResult: { data: { outcome: "SCHEMA_INVALID", outputJson: undefined } },
     context: EXTRACTION_CONTEXT,
   });
-  check("unparseable Ollama output -> extraction_failed, not clarify", r.extractionOutcome === "extraction_failed" && r.reasonCode === "unparseable_output", r);
+  check("non-VALID AI Core outcome -> extraction_failed, not clarify", r.extractionOutcome === "extraction_failed" && r.reasonCode === "ai_core_invalid_output", r);
 }
 {
-  // The Ollama call itself failing (onError: continueRegularOutput -> $json.error)
+  // AI Core VALID but with a missing/non-object outputJson (defensive --
+  // should not happen in practice, but never trusted blindly).
+  const r = runValidateExtraction({
+    ollamaResult: { data: { outcome: "VALID", outputJson: null } },
+    context: EXTRACTION_CONTEXT,
+  });
+  check("VALID outcome with no outputJson -> extraction_failed, not a throw", r.extractionOutcome === "extraction_failed" && r.reasonCode === "ai_core_invalid_output", r);
+}
+{
+  // The AI Core call itself failing (onError: continueRegularOutput -> $json.error)
   // is handled the same defensive way, never a thrown error.
   const r = runValidateExtraction({
     ollamaResult: { error: { message: "connect ECONNREFUSED" } },
     context: EXTRACTION_CONTEXT,
   });
-  check("Ollama call failure -> extraction_failed, not clarify, no throw", r.extractionOutcome === "extraction_failed" && r.reasonCode === "ollama_call_failed", r);
+  check("AI Core call failure -> extraction_failed, not clarify, no throw", r.extractionOutcome === "extraction_failed" && r.reasonCode === "ai_core_call_failed", r);
 }
 
 // 14. Unknown/invalid paymentMethod is dropped, never blocks the expense
 // (paymentMethod is optional in the Finance API contract).
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", paymentMethod: "BITCOIN", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", paymentMethod: "BITCOIN", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("unknown paymentMethod is dropped, does not block a valid expense", r.extractionOutcome === "valid" && r.paymentMethod === undefined, r);
@@ -363,7 +378,7 @@ function ollamaChatResponse(obj) {
 // not dropped.
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", paymentMethod: "CASH", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", paymentMethod: "CASH", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("a valid paymentMethod value passes through unchanged", r.extractionOutcome === "valid" && r.paymentMethod === "CASH", r);
@@ -376,21 +391,21 @@ function ollamaChatResponse(obj) {
 // never blocks an otherwise-valid extraction either way.
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 15, category: "UTILITIES", date: "2026-08-10", description: "Netflix", isRecurring: true }),
+    ollamaResult: aiCoreResponse({ amount: 15, category: "UTILITIES", date: "2026-08-10", description: "Netflix", isRecurring: true }),
     context: EXTRACTION_CONTEXT,
   });
   check("explicit isRecurring: true is honored", r.extractionOutcome === "valid" && r.isRecurring === true, r);
 }
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10", isRecurring: false }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10", isRecurring: false }),
     context: EXTRACTION_CONTEXT,
   });
   check("explicit isRecurring: false is honored", r.extractionOutcome === "valid" && r.isRecurring === false, r);
 }
 {
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10" }),
     context: EXTRACTION_CONTEXT,
   });
   check("isRecurring defaults to false when the model omits it entirely", r.extractionOutcome === "valid" && r.isRecurring === false, r);
@@ -400,7 +415,7 @@ function ollamaChatResponse(obj) {
   // never guessed as true -- only a literal boolean true is honored,
   // matching the extraction prompt's own "NEVER guess true" instruction.
   const r = runValidateExtraction({
-    ollamaResult: ollamaChatResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10", isRecurring: "yes" }),
+    ollamaResult: aiCoreResponse({ amount: 12.5, category: "FOOD", date: "2026-08-10", isRecurring: "yes" }),
     context: EXTRACTION_CONTEXT,
   });
   check("a non-boolean isRecurring value defaults to false, never guessed true", r.extractionOutcome === "valid" && r.isRecurring === false, r);
@@ -687,7 +702,9 @@ function expenseDataValid(extractionResult) {
 // same way a snapshot test is intentionally re-recorded.
 {
   const crypto = require("crypto");
-  const EXPECTED_ROUTER_HASH = "8025e19a23d834c9763c585b6aebfa5fc6f9b11ed4495cde5432cc0aa54a2005";
+  // Updated for the ADR-0014 AI Core migration (deliberate, reviewed change
+  // to the Router -- see docs/adrs/ADR-0014-finance-ai-core-migration.md).
+  const EXPECTED_ROUTER_HASH = "0986cecd1c77c4c76be7cf496ac3a9f2bb6a44ef9a71009103926939e7c7a99c";
   const EXPECTED_ENTRY_HASH = "cb9ec9e53b3fbcd1d2b5fa76e74d6f0d1b539f686789229f5b3bdde5f7a73564";
   const routerPath = path.join(__dirname, "../../../workflows/finance/02-finance-intent-router.json");
   const entryPath = path.join(__dirname, "../../../workflows/finance/01-finance-inbox-entry.json");
@@ -707,20 +724,25 @@ function expenseDataValid(extractionResult) {
 }
 
 // 30. Exactly two httpRequest (API call) nodes exist, and only in this
-// Handler's own boundary: one to Ollama for extraction, one to the Finance
+// Handler's own boundary: one to AI Core for extraction, one to the Finance
 // Service API for the write -- no other API surface, no accidental extra
-// call.
+// call, and no direct Ollama call anywhere (ADR-0014 migration).
 {
   const httpRequestNodes = wf.nodes.filter((n) => n.type === "n8n-nodes-base.httpRequest");
   check("exactly 2 httpRequest nodes exist in this Handler", httpRequestNodes.length === 2, httpRequestNodes.map((n) => n.name));
   check(
-    "one httpRequest node targets Ollama for extraction",
-    httpRequestNodes.some((n) => n.parameters.url.includes("OLLAMA_BASE_URL")),
+    "one httpRequest node targets AI Core's expense-extraction capability",
+    httpRequestNodes.some((n) => n.parameters.url.includes("EYAN_API_BASE_URL") && n.parameters.url.includes("/ai-core/service/capabilities/expense-extraction/invoke")),
     httpRequestNodes.map((n) => n.parameters.url)
   );
   check(
     "one httpRequest node targets the real Finance API endpoint",
     httpRequestNodes.some((n) => n.parameters.url.includes("EYAN_API_BASE_URL") && n.parameters.url.includes("/finance/service/expenses")),
+    httpRequestNodes.map((n) => n.parameters.url)
+  );
+  check(
+    "no httpRequest node calls Ollama directly anymore",
+    !httpRequestNodes.some((n) => n.parameters.url.includes("OLLAMA_BASE_URL")),
     httpRequestNodes.map((n) => n.parameters.url)
   );
 }
@@ -745,10 +767,12 @@ function expenseDataValid(extractionResult) {
 }
 
 // 32. No hardcoded credentials, API keys, bearer tokens, or secret-shaped
-// literals anywhere in the committed workflow JSON. The only `credentials`
+// literals anywhere in the committed workflow JSON. Every `credentials`
 // block references the pre-existing, reused "EYAN Service API" credential
-// by id/name (never a raw secret value) -- Ollama needs no credential at
-// all (no auth locally).
+// by id/name (never a raw secret value). Since the ADR-0014 migration, two
+// nodes now carry this reference (AI Core + Finance API), not one -- Ollama
+// never needed a credential (no auth locally); AI Core is authenticated the
+// same way the Finance API call already was.
 {
   const raw = fs.readFileSync(path.join(__dirname, "../../../workflows/finance/10-handle-create-expense.json"), "utf8");
   check("no 'Bearer ' literal anywhere in the workflow JSON", !raw.includes("Bearer "), null);
@@ -756,11 +780,11 @@ function expenseDataValid(extractionResult) {
   check("no apiKey-shaped literal", !/["']?api[_-]?key["']?\s*:\s*["'][^"']+["']/i.test(raw.replace(/\/\/.*$/gm, "")), null);
 
   const credentialNodes = wf.nodes.filter((n) => n.credentials);
-  check("exactly one node carries a credentials reference", credentialNodes.length === 1, credentialNodes.map((n) => n.name));
+  check("exactly two nodes carry a credentials reference (AI Core call + Finance API call)", credentialNodes.length === 2, credentialNodes.map((n) => n.name));
   check(
-    "that credential is a reference (id/name) to the existing EYAN Service API credential, not an inline secret",
-    credentialNodes[0].credentials.httpHeaderAuth.id === "HkpCn7QOHOauRVq1" && credentialNodes[0].credentials.httpHeaderAuth.name === "EYAN Service API",
-    credentialNodes[0].credentials
+    "every credentialed node references the existing EYAN Service API credential, not an inline secret",
+    credentialNodes.every((n) => n.credentials.httpHeaderAuth.id === "HkpCn7QOHOauRVq1" && n.credentials.httpHeaderAuth.name === "EYAN Service API"),
+    credentialNodes.map((n) => n.credentials)
   );
 }
 

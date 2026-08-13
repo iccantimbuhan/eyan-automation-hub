@@ -43,9 +43,6 @@ services:
     container_name: eyan-n8n
     restart: unless-stopped
 
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
     depends_on:
       postgres:
         condition: service_healthy

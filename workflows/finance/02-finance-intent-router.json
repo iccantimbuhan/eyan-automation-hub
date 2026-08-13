@@ -7,7 +7,10 @@
       "name": "When Called by Another Workflow",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.2,
-      "position": [0, 0],
+      "position": [
+        0,
+        0
+      ],
       "parameters": {
         "inputSource": "passthrough"
       }
@@ -17,7 +20,10 @@
       "name": "Validate Request Contract",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [220, 0],
+      "position": [
+        220,
+        0
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
@@ -29,7 +35,10 @@
       "name": "Request Valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
-      "position": [440, 0],
+      "position": [
+        440,
+        0
+      ],
       "parameters": {
         "conditions": {
           "combinator": "and",
@@ -57,69 +66,29 @@
       "name": "Build Contract Violation Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [660, 180],
+      "position": [
+        660,
+        180
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// The request never reached the AI Agent -- this is an orchestration-layer\n// rejection (malformed envelope), not a Finance business decision, so it\n// still returns a fully Response-contract-shaped object (ADR-0008 Decision 2).\nconst v = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId || 'unknown',\n    status: 'error',\n    intent: 'UNRECOGNIZED',\n    message: 'This request does not match the Finance Inbox Workflow Contract and could not be processed.',\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
-      }
-    },
-    {
-      "id": "n5",
-      "name": "Ollama Chat Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
-      "typeVersion": 1,
-      "position": [660, -160],
-      "parameters": {
-        "model": "mistral:7b",
-        "options": {
-          "format": "json"
-        }
-      },
-      "credentials": {
-        "ollamaApi": {
-          "id": "OllamaLocalCred01",
-          "name": "Ollama (Local)"
-        }
-      }
-    },
-    {
-      "id": "n6",
-      "name": "Intent Output Parser",
-      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
-      "typeVersion": 1.3,
-      "position": [880, -160],
-      "parameters": {
-        "schemaType": "fromJson",
-        "jsonSchemaExample": "{\n  \"intent\": \"CREATE_EXPENSE\",\n  \"confidence\": 0.92\n}"
-      }
-    },
-    {
-      "id": "n7",
-      "name": "AI Agent - Classify Intent",
-      "type": "@n8n/n8n-nodes-langchain.agent",
-      "typeVersion": 3.1,
-      "onError": "continueRegularOutput",
-      "position": [880, 0],
-      "parameters": {
-        "promptType": "define",
-        "text": "={{ 'Message: ' + $json.rawText + (($json.attachments && $json.attachments.length) ? ('\\n[This message includes ' + $json.attachments.length + ' attachment(s).]') : '') }}",
-        "hasOutputParser": true,
-        "options": {
-          "systemMessage": "You are the Finance Intent Router's classifier for the AI Finance Inbox. Your ONLY job is to read the user's raw message and decide which ONE of these Finance intents it belongs to. You do not extract amounts, categories, dates, or any other field -- that is a downstream Handler workflow's job, not yours. You do not answer questions, do not perform calculations, and you have no access to any Finance data.\n\nRespond with exactly one intent value:\n\n- CREATE_EXPENSE: the user is describing money they spent (e.g. \"spent $12 on lunch\", \"bought groceries for 45\").\n- GET_BUDGET: the user is asking about their configured monthly budget limit (e.g. \"what's my budget?\").\n- GET_DASHBOARD: the user is asking for a spending summary or overview (e.g. \"how am I doing this month?\", \"show my spending\").\n- GET_FINANCE_QUESTION: an open-ended finance question not covered by GET_BUDGET or GET_DASHBOARD (e.g. \"am I overspending on food?\", \"what's my biggest expense category?\").\n- CREATE_INCOME: the user is describing money they received (e.g. \"got paid $2000\", \"received a refund of $30\").\n- CREATE_TRANSFER: the user is describing money moved between accounts or people, not spent or earned (e.g. \"sent $50 to Alex\", \"transferred money to savings\").\n- UPLOAD_RECEIPT: the message references a shared image or attachment that appears to be a receipt.\n- UNRECOGNIZED: the message does not clearly fit any of the above -- small talk, unrelated questions, or genuine ambiguity between two intents.\n\nAlways prefer UNRECOGNIZED over guessing when the message is ambiguous -- a wrong guess between CREATE_EXPENSE, CREATE_INCOME, and CREATE_TRANSFER is worse than asking the user to clarify.\n\nReturn your confidence in this classification as a number between 0 and 1."
-        }
+        "jsCode": "// The request never reached the classifier -- this is an orchestration-layer\n// rejection (malformed envelope), not a Finance business decision, so it\n// still returns a fully Response-contract-shaped object (ADR-0008 Decision 2).\nconst v = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId || 'unknown',\n    status: 'error',\n    intent: 'UNRECOGNIZED',\n    message: 'This request does not match the Finance Inbox Workflow Contract and could not be processed.',\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
       }
     },
     {
       "id": "n8",
-      "name": "Validate Agent Output",
+      "name": "Merge Context With Classification",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1100, 0],
+      "position": [
+        1220,
+        0
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// ADR-0008 Decision 4 -- a malformed/unparseable Agent response, an intent\n// outside the known catalog, or the Agent call failing outright (e.g. a\n// local Ollama model returning output that doesn't fit the required\n// schema -- a real, observed failure mode, not hypothetical; see ADR-0007's\n// own account of local-model JSON-schema unreliability, and\n// \"AI Agent - Classify Intent\"'s onError: continueRegularOutput) is forced\n// to UNRECOGNIZED rather than reaching the Intent Router with a bad value\n// or crashing this workflow. Original request context is read back from\n// \"Validate Request Contract\" by node name, not trusted to have survived\n// through the Agent node -- the Agent's own output shape is whatever the\n// Structured Output Parser produced (or an error object), nothing more.\nconst context = $('Validate Request Contract').item.json;\nconst KNOWN_INTENTS = [\n  'CREATE_EXPENSE', 'GET_BUDGET', 'GET_DASHBOARD', 'GET_FINANCE_QUESTION',\n  'CREATE_INCOME', 'CREATE_TRANSFER', 'UPLOAD_RECEIPT', 'UNRECOGNIZED',\n];\n\nlet classification = null;\nif ($json && $json.error) {\n  const message = String(($json.error && $json.error.message) || $json.error);\n  console.log(`[Validate Agent Output] AI Agent call failed, defaulting to UNRECOGNIZED: ${message}`);\n} else {\n  try {\n    const raw = $json.output;\n    classification = typeof raw === 'string' ? JSON.parse(raw) : raw;\n  } catch (error) {\n    classification = null;\n  }\n}\n\nconst intent = classification && KNOWN_INTENTS.includes(classification.intent)\n  ? classification.intent\n  : 'UNRECOGNIZED';\nconst confidence = classification && typeof classification.confidence === 'number'\n  ? classification.confidence\n  : 0;\n\nreturn [{\n  json: {\n    contractVersion: context.contractVersion,\n    workflowExecutionId: context.workflowExecutionId,\n    workflowName: context.workflowName,\n    channel: context.channel,\n    externalUserId: context.externalUserId,\n    externalMessageId: context.externalMessageId,\n    rawText: context.rawText,\n    attachments: context.attachments,\n    intent,\n    confidence,\n  },\n}];\n"
+        "jsCode": "// Merges the deterministic classifier's {intent, confidence} output (from\n// \"Parse Classification Output\") with the original request context (from\n// \"Validate Request Contract\"), producing the full record the Intent\n// Router and every Handler need. All classification-output validation\n// already happened upstream in \"Parse Classification Output\" -- by the\n// time this node runs, $json.intent is guaranteed to be one of the eight\n// Intent Catalog values and $json.confidence is guaranteed to be a number\n// in [0, 1], so this node does no re-validation, only merging.\nconst context = $('Validate Request Contract').item.json;\n\nreturn [{\n  json: {\n    contractVersion: context.contractVersion,\n    workflowExecutionId: context.workflowExecutionId,\n    workflowName: context.workflowName,\n    channel: context.channel,\n    externalUserId: context.externalUserId,\n    externalMessageId: context.externalMessageId,\n    rawText: context.rawText,\n    attachments: context.attachments,\n    intent: $json.intent,\n    confidence: $json.confidence,\n  },\n}];\n"
       }
     },
     {
@@ -127,7 +96,10 @@
       "name": "Intent Router",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
-      "position": [1320, 0],
+      "position": [
+        1320,
+        0
+      ],
       "parameters": {
         "mode": "rules",
         "rules": {
@@ -135,9 +107,20 @@
             {
               "outputKey": "CREATE_EXPENSE",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "CREATE_EXPENSE" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "CREATE_EXPENSE"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -145,9 +128,20 @@
             {
               "outputKey": "GET_BUDGET",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "GET_BUDGET" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "GET_BUDGET"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -155,9 +149,20 @@
             {
               "outputKey": "GET_DASHBOARD",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "GET_DASHBOARD" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "GET_DASHBOARD"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -165,9 +170,20 @@
             {
               "outputKey": "GET_FINANCE_QUESTION",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "GET_FINANCE_QUESTION" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "GET_FINANCE_QUESTION"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -175,9 +191,20 @@
             {
               "outputKey": "CREATE_INCOME",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "CREATE_INCOME" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "CREATE_INCOME"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -185,9 +212,20 @@
             {
               "outputKey": "CREATE_TRANSFER",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "CREATE_TRANSFER" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "CREATE_TRANSFER"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -195,9 +233,20 @@
             {
               "outputKey": "UPLOAD_RECEIPT",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "UPLOAD_RECEIPT" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "UPLOAD_RECEIPT"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -205,9 +254,20 @@
             {
               "outputKey": "UNRECOGNIZED",
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
-                  { "leftValue": "={{ $json.intent }}", "operator": { "type": "string", "operation": "equals" }, "rightValue": "UNRECOGNIZED" }
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "UNRECOGNIZED"
+                  }
                 ],
                 "combinator": "and"
               }
@@ -226,7 +286,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, -560],
+      "position": [
+        1540,
+        -560
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerCreateExpenseWf01"
       }
@@ -237,7 +300,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, -400],
+      "position": [
+        1540,
+        -400
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerGetBudgetWf01"
       }
@@ -248,7 +314,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, -240],
+      "position": [
+        1540,
+        -240
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerGetDashboardWf01"
       }
@@ -259,7 +328,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, -80],
+      "position": [
+        1540,
+        -80
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerGetFinanceQuestionWf01"
       }
@@ -270,7 +342,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, 80],
+      "position": [
+        1540,
+        80
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerCreateIncomeWf01"
       }
@@ -281,7 +356,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, 240],
+      "position": [
+        1540,
+        240
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerCreateTransferWf01"
       }
@@ -292,7 +370,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, 400],
+      "position": [
+        1540,
+        400
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerUploadReceiptWf01"
       }
@@ -303,7 +384,10 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1,
       "onError": "continueRegularOutput",
-      "position": [1540, 560],
+      "position": [
+        1540,
+        560
+      ],
       "parameters": {
         "workflowId": "FinanceHandlerUnrecognizedIntentWf01"
       }
@@ -313,75 +397,290 @@
       "name": "Return Handler Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1760, 0],
+      "position": [
+        1760,
+        0
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// Orchestration-layer only: if the Execute Workflow call itself failed --\n// today, ALWAYS, since no Handler workflow exists yet (Phase 2 explicitly\n// does not build one) -- this synthesizes a Response-contract-shaped\n// fallback (ADR-0008 Decision 2), using context preserved from \"Validate\n// Agent Output\" since a failed Execute Workflow call loses the original\n// request. This is infrastructural resilience (\"the handler is\n// unreachable\"), never a Finance business decision -- no amount/category/\n// budget logic appears here. On success, the Handler's own response is\n// returned completely unchanged, per this workflow's stated scope.\nconst context = $('Validate Agent Output').item.json;\nconst handlerResult = $json;\n\nif (handlerResult && handlerResult.error) {\n  const message = String((handlerResult.error && handlerResult.error.message) || handlerResult.error);\n  console.log(`[Return Handler Response] Handler call failed for intent ${context.intent}: ${message}`);\n\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: context.workflowExecutionId,\n      status: 'error',\n      intent: context.intent,\n      message: \"Sorry, I couldn't process that just now. Please try again in a moment.\",\n      data: null,\n      clarifyingQuestion: null,\n    },\n  }];\n}\n\nreturn [{ json: handlerResult }];\n"
+        "jsCode": "// Orchestration-layer only: if the Execute Workflow call itself failed --\n// today, ALWAYS, since no Handler workflow exists yet (Phase 2 explicitly\n// does not build one) -- this synthesizes a Response-contract-shaped\n// fallback (ADR-0008 Decision 2), using context preserved from \"Merge\n// Context With Classification\" since a failed Execute Workflow call loses\n// the original request. This is infrastructural resilience (\"the handler\n// is unreachable\"), never a Finance business decision -- no\n// amount/category/budget logic appears here. On success, the Handler's own\n// response is returned completely unchanged, per this workflow's stated\n// scope.\nconst context = $('Merge Context With Classification').item.json;\nconst handlerResult = $json;\n\nif (handlerResult && handlerResult.error) {\n  const message = String((handlerResult.error && handlerResult.error.message) || handlerResult.error);\n  console.log(`[Return Handler Response] Handler call failed for intent ${context.intent}: ${message}`);\n\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: context.workflowExecutionId,\n      status: 'error',\n      intent: context.intent,\n      message: \"Sorry, I couldn't process that just now. Please try again in a moment.\",\n      data: null,\n      clarifyingQuestion: null,\n    },\n  }];\n}\n\nreturn [{ json: handlerResult }];\n"
+      }
+    },
+    {
+      "id": "n19",
+      "name": "Call AI Core - Intent Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/ai-core/service/capabilities/finance-intent-classification/invoke",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ input: { message: $json.rawText, attachmentCount: ($json.attachments && $json.attachments.length) || 0 }, context: { expectJson: true, workflowName: '02-finance-intent-router', workflowExecutionId: $json.workflowExecutionId } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n20",
+      "name": "Parse Classification Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Deterministic classification-output validator. As of the ADR-0014 AI\n// Core migration, JSON extraction (fence-stripping, brace-span extraction)\n// is AI Core's own job (ai-routing.service.ts's extractJson() -- the exact\n// mechanism this node used to do itself pre-migration) -- this node's\n// remaining job is unwrapping AI Core's response envelope and re-validating\n// the parsed object's business shape (8-value intent enum, confidence in\n// [0,1]) as defense-in-depth, since AI Core enforces nothing beyond \"is\n// this parseable JSON\" (see docs/adrs/ADR-0014-finance-ai-core-migration.md).\n// Never throws; always returns a value the Intent Router can safely route\n// on.\nconst KNOWN_INTENTS = [\n  'CREATE_EXPENSE', 'GET_BUDGET', 'GET_DASHBOARD', 'GET_FINANCE_QUESTION',\n  'CREATE_INCOME', 'CREATE_TRANSFER', 'UPLOAD_RECEIPT', 'UNRECOGNIZED',\n];\nconst FALLBACK = { intent: 'UNRECOGNIZED', confidence: 0 };\n\nfunction isValidClassification(parsed) {\n  return (\n    parsed !== null &&\n    typeof parsed === 'object' &&\n    !Array.isArray(parsed) &&\n    typeof parsed.intent === 'string' &&\n    KNOWN_INTENTS.includes(parsed.intent) &&\n    typeof parsed.confidence === 'number' &&\n    Number.isFinite(parsed.confidence) &&\n    parsed.confidence >= 0 &&\n    parsed.confidence <= 1\n  );\n}\n\nif ($json && $json.error) {\n  const message = String(($json.error && $json.error.message) || $json.error);\n  console.log(`[Parse Classification Output] AI Core call failed, defaulting to UNRECOGNIZED: ${message}`);\n  return [{ json: FALLBACK }];\n}\n\nconst result = $json && $json.data;\n\nif (!result || result.outcome !== 'VALID') {\n  console.log(`[Parse Classification Output] AI Core did not return a valid classification (outcome: ${result && result.outcome}), defaulting to UNRECOGNIZED.`);\n  return [{ json: FALLBACK }];\n}\n\nconst parsed = result.outputJson;\n\nif (isValidClassification(parsed)) {\n  return [{ json: { intent: parsed.intent, confidence: parsed.confidence } }];\n}\n\nconsole.log(`[Parse Classification Output] Malformed or invalid classification shape, defaulting to UNRECOGNIZED. Raw: ${String(JSON.stringify(parsed)).slice(0, 300)}`);\nreturn [{ json: FALLBACK }];\n"
       }
     }
   ],
   "connections": {
     "When Called by Another Workflow": {
-      "main": [[{ "node": "Validate Request Contract", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Validate Request Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Validate Request Contract": {
-      "main": [[{ "node": "Request Valid?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Request Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Request Valid?": {
       "main": [
-        [{ "node": "AI Agent - Classify Intent", "type": "main", "index": 0 }],
-        [{ "node": "Build Contract Violation Response", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Call AI Core - Intent Classification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Contract Violation Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
-    "Ollama Chat Model": {
-      "ai_languageModel": [[{ "node": "AI Agent - Classify Intent", "type": "ai_languageModel", "index": 0 }]]
+    "Call AI Core - Intent Classification": {
+      "main": [
+        [
+          {
+            "node": "Parse Classification Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
-    "Intent Output Parser": {
-      "ai_outputParser": [[{ "node": "AI Agent - Classify Intent", "type": "ai_outputParser", "index": 0 }]]
+    "Parse Classification Output": {
+      "main": [
+        [
+          {
+            "node": "Merge Context With Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
-    "AI Agent - Classify Intent": {
-      "main": [[{ "node": "Validate Agent Output", "type": "main", "index": 0 }]]
-    },
-    "Validate Agent Output": {
-      "main": [[{ "node": "Intent Router", "type": "main", "index": 0 }]]
+    "Merge Context With Classification": {
+      "main": [
+        [
+          {
+            "node": "Intent Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Intent Router": {
       "main": [
-        [{ "node": "Execute Handler - CREATE_EXPENSE", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - GET_BUDGET", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - GET_DASHBOARD", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - GET_FINANCE_QUESTION", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - CREATE_INCOME", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - CREATE_TRANSFER", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - UPLOAD_RECEIPT", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - UNRECOGNIZED", "type": "main", "index": 0 }],
-        [{ "node": "Execute Handler - UNRECOGNIZED", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Execute Handler - CREATE_EXPENSE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - GET_BUDGET",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - GET_DASHBOARD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - GET_FINANCE_QUESTION",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - CREATE_INCOME",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - CREATE_TRANSFER",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - UPLOAD_RECEIPT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - UNRECOGNIZED",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Handler - UNRECOGNIZED",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Execute Handler - CREATE_EXPENSE": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - GET_BUDGET": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - GET_DASHBOARD": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - GET_FINANCE_QUESTION": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - CREATE_INCOME": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - CREATE_TRANSFER": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - UPLOAD_RECEIPT": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Execute Handler - UNRECOGNIZED": {
-      "main": [[{ "node": "Return Handler Response", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Return Handler Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,

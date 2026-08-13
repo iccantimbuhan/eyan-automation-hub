@@ -112,8 +112,19 @@ Rationale, given that **neither compatible model actually produces usable struct
 - **The real blocking issue is the Agent-node/parser incompatibility with tool-calling-wrapped output, not model selection** — swapping models further within this same Agent-node architecture is very unlikely to fix it, since both tool-capable models tried produce the identical wrapper shape. Follow-up work should target the Agent/parser mechanism itself (see Follow-up Recommendations in the Phase 2.5 validation report), not a third model.
 - If the wrapper issue is fixed by a future change, this ADR's latency/calibration comparison remains the relevant basis for model choice — re-run this evaluation's test set against the fix before assuming `mistral:7b` is still the better choice, since the fix itself might behave differently per model.
 
+# Addendum (2026-08-13): model selection superseded by AI Core migration, `gemma3:4b`'s tools-capability exclusion now moot
+
+`docs/adrs/ADR-0014-finance-ai-core-migration.md` moves intent classification off any n8n-side LLM-calling node (`lmChatOllama`, `chainLlm`) entirely, onto AI Core's `finance-intent-classification` capability. `mistral:7b` remains the configured model — this ADR's comparison-driven recommendation is what AI Core's `finance-intent-brain` Routing Policy is seeded with — but model *selection* is now AI Core admin-UI configuration, not a hardcoded n8n node parameter this ADR's Decision is pinning.
+
+This ADR's central finding (the `format_final_json_response` tool-call-wrapper mismatch between n8n's `ToolsAgent`-based Agent node and `N8nStructuredOutputParser`) remains historically accurate and unchanged — it was already fixed for this Router by ADR-0012's replacement of the Agent-node mechanism, not by ADR-0014. What ADR-0014 changes is unrelated to that finding: it replaces ADR-0012's direct `chainLlm`-to-Ollama call with a call to AI Core, which does its own non-tool-calling, non-Agent-node call to Ollama's native `/api/chat` endpoint (architecturally similar to ADR-0012's own `chainLlm` approach, just now behind AI Core rather than inside the workflow).
+
+This ADR's exclusion of `gemma3:4b` was scoped specifically to n8n's `ToolsAgent`-based Agent node (it lacks Ollama "tools" capability, hard-erroring against that node type). AI Core's Ollama provider adapter has no tool-calling dependency, so this exclusion never applied there and is now fully moot for this task — not contradicted, just out of scope for the mechanism actually in use.
+
+Live-verified 2026-08-13 (see ADR-0014): a real call to `finance-intent-classification` correctly routed to `mistral:7b`, returned `VALID` with 0 retries in 234.5s, and classified the test message correctly at 0.95 confidence.
+
 # Related Documents
 
+- `docs/adrs/ADR-0014-finance-ai-core-migration.md` (supersedes this ADR's transport mechanism; live-verifies `mistral:7b` through the new path)
 - `docs/adrs/ADR-0008-finance-inbox-workflow-contract.md` (the contract this classification serves)
 - `docs/adrs/ADR-0007-n8n-ollama-connectivity-gap.md` (prior, task-different finding on `qwen2.5-coder:7b`; also the precedent for live-verification-over-mocking used here)
 - `docs/adrs/ADR-0005-workflow-organization.md` (CLI-behavior findings collection, extended here with the `--rawOutput` stdout-pollution note)

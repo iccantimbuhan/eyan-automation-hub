@@ -50,8 +50,17 @@ Also confirmed in production testing: 2048 is a better `num_ctx` than Ollama's 4
 
 `gemma3:4b` correctly extracts all six fields, but — without strongly constrained enum instructions — was observed returning values outside the application's contract (e.g. `category: "Food & Drink"`, `paymentMethod: "Imagin Card"`, `date: "today"`). The extraction prompt (`workflows/finance/prompts/expense-extraction.v3.md`) was strengthened with explicit negative examples and output rules to reduce this. **This does not change or weaken `Validate Expense Extraction`'s downstream validation** — the real `ExpenseCategory`/`PaymentMethod` enum checks remain the actual safety net; the prompt change only reduces how often that safety net has to fall back to a clarifying question.
 
+# Addendum (2026-08-13): transport superseded by AI Core migration
+
+`docs/adrs/ADR-0014-finance-ai-core-migration.md` replaces this ADR's Decision — the direct `httpRequest` call to Ollama's native `/api/chat` endpoint — with a call to AI Core's `expense-extraction` capability (`POST /ai-core/service/capabilities/expense-extraction/invoke`), which in turn calls Ollama's `/api/chat` endpoint itself, now from inside `eyan-ai-platform` rather than from this Handler workflow. This ADR's underlying reasoning (a plain, non-Agent-node HTTP call reliably avoids the tool-call-wrapper failure ADR-0009 diagnosed) is not overturned — it is the same reasoning AI Core's Ollama provider adapter is itself built on, confirmed still true for this exact prompt/model pair by the live verification below.
+
+`gemma3:4b` (this ADR's 2026-08-12 Addendum) remains the configured model — `expense-extraction-brain`'s AI Core Routing Policy is seeded with it. Every field-level validation rule this ADR's Handler enforces (`Validate Expense Extraction`'s amount/category/paymentMethod/date/description/isRecurring enum and range checks) is preserved verbatim as defense-in-depth against AI Core's output, exactly as it was against direct Ollama's output — AI Core enforces no per-capability schema, so this Handler's own validation remains the real safety net, unchanged.
+
+Live-verified 2026-08-13 (see ADR-0014): a real call to `expense-extraction` correctly routed to `gemma3:4b`, returned `VALID` with 0 retries in 176.8s, and correctly extracted all six fields from a real test message — including a case where the model wrapped its JSON in a Markdown ` ```json ` fence, which AI Core's `extractJson()` correctly stripped before this Handler ever saw the response.
+
 # Related Documents
 
+- `docs/adrs/ADR-0014-finance-ai-core-migration.md` (supersedes this ADR's transport mechanism; live-verifies `gemma3:4b` through the new path)
 - `docs/adrs/ADR-0008-finance-inbox-workflow-contract.md` (the contract this Handler implements)
 - `docs/adrs/ADR-0009-finance-intent-router-model-selection.md` (the diagnosis this ADR's Decision is built on)
 - `docs/adrs/ADR-0007-n8n-ollama-connectivity-gap.md` (the connectivity precedent both Ollama-calling patterns rely on; also CRM Workflow 3's own move away from the LangChain-Agent pattern)
