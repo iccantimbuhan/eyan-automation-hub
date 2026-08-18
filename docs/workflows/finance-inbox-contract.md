@@ -26,11 +26,12 @@ Front Door                    Intent Router                  Handler
                                 only, no business logic)       each, all business logic)
 
   Slack   ─┐
-  Telegram ─┤                                                  ┌─ CREATE_EXPENSE handler (not built)
-  WhatsApp ─┼──[Request]──▶  Finance Intent Router  ──[Request]─┼─ GET_DASHBOARD handler (not built)
-  Retell   ─┤   (§ Request      (built, Phase 2 --               ├─ GET_FINANCE_QUESTION handler (not built)
-  Web Chat ─┤    Contract)       02-finance-intent-router.json)   ├─ CREATE_INCOME handler (not built, stub)
-  OCR      ─┘                                                    ├─ CREATE_TRANSFER handler (not built, stub)
+  Telegram ─┤                                                  ┌─ CREATE_EXPENSE handler (built)
+  WhatsApp ─┼──[Request]──▶  Finance Intent Router  ──[Request]─┼─ GET_BUDGET handler (built)
+  Retell   ─┤   (§ Request      (built, Phase 2 --               ├─ GET_DASHBOARD handler (built)
+  Web Chat ─┤    Contract)       02-finance-intent-router.json)   ├─ GET_FINANCE_QUESTION handler (built)
+  OCR      ─┘                                                    ├─ CREATE_INCOME handler (not built, stub)
+                                                                  ├─ CREATE_TRANSFER handler (not built, stub)
                                                                   └─ UPLOAD_RECEIPT handler (not built)
   ◀──────────────────────[Response]──────────────────────────────────┘
        (§ Response Contract, produced by the Router directly for
@@ -110,9 +111,9 @@ A front door that does nothing but `postReply(response.message)` is always a cor
 | Intent | Purpose | Example message | Fields the Handler extracts from `rawText`/`attachments` (Phase 2 amendment — the Router itself extracts nothing beyond `{intent, confidence}`; see ADR-0008 Notes) | Handler writes to | Backend readiness |
 |---|---|---|---|---|---|
 | `CREATE_EXPENSE` | Log an expense | "spent $12.50 on lunch" | `date, amount, category, paymentMethod?, description?, isRecurring?` | `POST /finance/service/expenses` | **Full** |
-| `GET_BUDGET` | Ask the monthly budget | "what's my budget this month?" | `period?` | *(none yet)* | **Not built** — use `GET_DASHBOARD` instead until a dedicated route exists |
-| `GET_DASHBOARD` | Ask for a spending summary | "how am I doing this month?" | `period?` | `GET /finance/service/dashboard` | **Full** |
-| `GET_FINANCE_QUESTION` | Open-ended finance question | "am I overspending on food?" | `question, impliedPeriod?, impliedCategory?` | `GET /finance/service/dashboard` + `/categories` | **Full** (composed, no dedicated endpoint) |
+| `GET_BUDGET` | Ask the monthly budget | "what's my budget this month?" | none — always the current period | `GET /finance/service/dashboard` (reads `budget`/`remainingBudget` only; same endpoint `GET_DASHBOARD` uses) | **Full** — `FinanceHandlerGetBudgetWf01` (`workflows/finance/11-handle-get-budget.json`) |
+| `GET_DASHBOARD` | Ask for a spending summary | "how am I doing this month?" | none — always the current period | `GET /finance/service/dashboard` | **Full** — `FinanceHandlerGetDashboardWf01` (`workflows/finance/12-handle-get-dashboard.json`) |
+| `GET_FINANCE_QUESTION` | Open-ended finance question | "am I overspending on food?" | none extracted in n8n -- `rawText` forwarded verbatim as `question` to AI Core, which interprets it grounded in the fetched dashboard data | `GET /finance/service/dashboard` (no `/categories` call needed -- the dashboard response's `categoryBreakdown` already covers it) | **Full** — `FinanceHandlerGetFinanceQuestionWf01` (`workflows/finance/13-handle-get-finance-question.json`), answered by AI Core's `finance-question` capability |
 | `CREATE_INCOME` | Log income | "got paid $2000" | `date, amount, source?, description?` | *(none — no data model)* | **Stub only** |
 | `CREATE_TRANSFER` | Log a transfer | "sent $50 to Alex" | `date, amount, counterparty?, description?` | *(none — no data model)* | **Stub only** |
 | `UPLOAD_RECEIPT` | Log an expense from a receipt | *(a shared image + caption)* | Same as `CREATE_EXPENSE` | `POST /finance/service/expenses` (via the `CREATE_EXPENSE` handler) | **Partial** — only when extraction succeeds |

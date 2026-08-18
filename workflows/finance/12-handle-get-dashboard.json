@@ -1,0 +1,178 @@
+{
+  "id": "FinanceHandlerGetDashboardWf01",
+  "name": "Finance - 12 - Handle Get Dashboard",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Validate Handler Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Structural validation of the Finance Inbox Request Contract this\n// workflow receives from the Intent Router (ADR-0008 Decision 1,\n// docs/workflows/finance-inbox-contract.md). Re-validated defensively here\n// -- this workflow could in principle be called directly, not only via the\n// Router -- same posture as 11-handle-get-budget.json's own \"Validate\n// Handler Input\", which this Handler is structurally identical to up to\n// this point. No Handler-specific requirement beyond the shared contract\n// shape: this is a read-only query against org-wide dashboard data (no\n// per-user scoping -- eyan-ai-platform backend/src/services/finance-dashboard.service.ts),\n// so no externalUserId is required, and no `period` is parsed out of\n// rawText -- this workflow always reports the current period, same\n// posture and same reasoning as 11-handle-get-budget.json.\nconst req = $json || {};\nconst reasons = [];\n\nfunction requireNonEmptyString(field) {\n  if (typeof req[field] !== 'string' || req[field].trim().length === 0) {\n    reasons.push(`Missing/empty required field: ${field}.`);\n  }\n}\n\nrequireNonEmptyString('contractVersion');\nrequireNonEmptyString('workflowExecutionId');\nrequireNonEmptyString('workflowName');\nrequireNonEmptyString('channel');\n\nif (typeof req.rawText !== 'string') {\n  reasons.push('rawText must be a string (may be empty).');\n}\n\nif (!Array.isArray(req.attachments)) {\n  reasons.push('attachments must be an array.');\n}\n\nreturn [{\n  json: {\n    valid: reasons.length === 0,\n    reason: reasons.join(' '),\n    contractVersion: req.contractVersion,\n    workflowExecutionId: req.workflowExecutionId,\n    workflowName: req.workflowName,\n    channel: req.channel,\n    externalUserId: req.externalUserId ?? null,\n    externalMessageId: req.externalMessageId ?? null,\n    rawText: typeof req.rawText === 'string' ? req.rawText : '',\n    attachments: Array.isArray(req.attachments) ? req.attachments : [],\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Handler Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Build Invalid Input Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Orchestration-layer rejection (malformed/incomplete envelope) -- not a\n// Finance business decision, so this never asks a clarifying question --\n// same posture as 11-handle-get-budget.json's own \"Build Invalid Input\n// Response\". intent stays GET_DASHBOARD (not UNRECOGNIZED): the Router\n// already classified this correctly before dispatching here.\nconst v = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId || 'unknown',\n    status: 'error',\n    intent: 'GET_DASHBOARD',\n    message: \"Sorry, I couldn't process that request. Please try again.\",\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Call Finance Service - Get Dashboard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/finance/service/dashboard",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Validate Finance API Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Maps the Eyan Finance Service API's GET /finance/service/dashboard\n// response onto the Response Contract (ADR-0008 Decision 2). This is the\n// SAME endpoint 11-handle-get-budget.json calls -- eyan-ai-platform's\n// ADR-0024 built one dashboard endpoint sufficient for both GET_BUDGET (a\n// narrow read of budget/remainingBudget) and GET_DASHBOARD (the full\n// response), rather than two separate routes. Unlike that Handler, this one\n// surfaces the full payload in `data` -- budget, totalExpenses,\n// remainingBudget, categoryBreakdown, spendingTrend, recentExpenses -- and\n// builds a readable multi-line `message` from period/budget/category/recent\n// data. spendingTrend is deliberately left out of `message` (it is still\n// present in `data` for a richer future front door) -- a 6-month list of\n// mostly-zero historical totals does not answer \"show me my spending\n// dashboard for this month\" as directly as the current period's own\n// numbers do, and rendering a trend judgment (\"spending is up/down\") would\n// be a business decision this node does not make. Purely read-only\n// formatting of real API data -- no mutation, no business calculation\n// (every number here is computed server-side by FinanceDashboardService;\n// this node only formats strings already returned).\nconst context = $('Validate Handler Input').item.json;\nconst result = $json;\n\nconst MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];\n\nfunction humanPeriod(period) {\n  const parts = typeof period === 'string' ? period.split('-') : [];\n  const year = Number(parts[0]);\n  const month = Number(parts[1]);\n  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return period;\n  return `${MONTH_NAMES[month - 1]} ${year}`;\n}\n\nfunction errorResponse(message) {\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: context.workflowExecutionId,\n      status: 'error',\n      intent: 'GET_DASHBOARD',\n      message,\n      data: null,\n      clarifyingQuestion: null,\n    },\n  }];\n}\n\nif (result && result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  console.log(`[Validate Finance API Response] Finance API call failed: ${message}`);\n  return errorResponse(\"Sorry, I couldn't load your dashboard right now. Please try again in a moment.\");\n}\n\nif (!result || result.success !== true || !result.data) {\n  console.log(`[Validate Finance API Response] Finance API returned an unexpected shape: ${JSON.stringify(result)}`);\n  return errorResponse(\"Sorry, I couldn't load your dashboard right now. Please try again in a moment.\");\n}\n\nconst data = result.data;\nconst period = humanPeriod(data.period);\nconst lines = [`Dashboard for ${period}:`];\n\nif (data.budget) {\n  const remainingNum = Number(data.remainingBudget);\n  const remainingText = Math.abs(remainingNum).toFixed(2);\n  lines.push(remainingNum < 0\n    ? `Spent $${data.totalExpenses} of your $${data.budget.monthlyLimit} budget -- $${remainingText} over budget.`\n    : `Spent $${data.totalExpenses} of your $${data.budget.monthlyLimit} budget -- $${remainingText} left.`);\n} else {\n  lines.push(`Spent $${data.totalExpenses} so far -- no budget set for this period.`);\n}\n\nconst categoryBreakdown = Array.isArray(data.categoryBreakdown) ? data.categoryBreakdown : [];\nif (categoryBreakdown.length > 0) {\n  lines.push('By category:');\n  for (const row of categoryBreakdown) {\n    lines.push(`- ${row.category}: $${row.total}`);\n  }\n}\n\nconst recentExpenses = Array.isArray(data.recentExpenses) ? data.recentExpenses : [];\nif (recentExpenses.length > 0) {\n  lines.push('Recent expenses:');\n  for (const expense of recentExpenses) {\n    const description = expense.description ? ` -- ${expense.description}` : '';\n    lines.push(`- $${expense.amount} ${expense.category}${description}`);\n  }\n}\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: context.workflowExecutionId,\n    status: 'success',\n    intent: 'GET_DASHBOARD',\n    message: lines.join('\\n'),\n    data: {\n      period: data.period,\n      budget: data.budget,\n      totalExpenses: data.totalExpenses,\n      remainingBudget: data.remainingBudget,\n      categoryBreakdown,\n      spendingTrend: Array.isArray(data.spendingTrend) ? data.spendingTrend : [],\n      recentExpenses,\n    },\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Validate Handler Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Handler Input": {
+      "main": [
+        [
+          {
+            "node": "Handler Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handler Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "Call Finance Service - Get Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Invalid Input Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Finance Service - Get Dashboard": {
+      "main": [
+        [
+          {
+            "node": "Validate Finance API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

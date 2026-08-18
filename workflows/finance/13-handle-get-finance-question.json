@@ -1,0 +1,335 @@
+{
+  "id": "FinanceHandlerGetFinanceQuestionWf01",
+  "name": "Finance - 13 - Handle Get Finance Question",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Validate Handler Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Structural validation of the Finance Inbox Request Contract this\n// workflow receives from the Intent Router (ADR-0008 Decision 1,\n// docs/workflows/finance-inbox-contract.md). Re-validated defensively here\n// -- this workflow could in principle be called directly, not only via the\n// Router -- same posture as 11-handle-get-budget.json / 12-handle-get-dashboard.json's\n// own \"Validate Handler Input\". No Handler-specific requirement beyond the\n// shared contract shape: this is a read-only query against org-wide\n// dashboard data (no per-user scoping), so no externalUserId is required.\n// Unlike the CREATE_EXPENSE Handler, rawText IS the thing this Handler\n// exists to interpret -- but interpretation happens entirely inside AI\n// Core's finance-question capability (see \"Prepare Finance Question\n// Input\"), never here. This node only validates that rawText is present as\n// a non-empty string -- an empty question has nothing for the AI Core call\n// to reason about, so it is rejected before any downstream call is made,\n// the one Handler-specific rule this workflow adds beyond the shared\n// contract shape.\nconst req = $json || {};\nconst reasons = [];\n\nfunction requireNonEmptyString(field) {\n  if (typeof req[field] !== 'string' || req[field].trim().length === 0) {\n    reasons.push(`Missing/empty required field: ${field}.`);\n  }\n}\n\nrequireNonEmptyString('contractVersion');\nrequireNonEmptyString('workflowExecutionId');\nrequireNonEmptyString('workflowName');\nrequireNonEmptyString('channel');\nrequireNonEmptyString('rawText');\n\nif (!Array.isArray(req.attachments)) {\n  reasons.push('attachments must be an array.');\n}\n\nreturn [{\n  json: {\n    valid: reasons.length === 0,\n    reason: reasons.join(' '),\n    contractVersion: req.contractVersion,\n    workflowExecutionId: req.workflowExecutionId,\n    workflowName: req.workflowName,\n    channel: req.channel,\n    externalUserId: req.externalUserId ?? null,\n    externalMessageId: req.externalMessageId ?? null,\n    rawText: typeof req.rawText === 'string' ? req.rawText : '',\n    attachments: Array.isArray(req.attachments) ? req.attachments : [],\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Handler Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Build Invalid Input Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        260
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Orchestration-layer rejection (malformed/incomplete envelope, or an\n// empty question) -- not a Finance business decision, so this never asks a\n// clarifying question -- same posture as the sibling GET_BUDGET/GET_DASHBOARD\n// Handlers' own \"Build Invalid Input Response\". intent stays\n// GET_FINANCE_QUESTION (not UNRECOGNIZED): the Router already classified\n// this correctly before dispatching here.\nconst v = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId || 'unknown',\n    status: 'error',\n    intent: 'GET_FINANCE_QUESTION',\n    message: \"Sorry, I couldn't process that request. Please try again.\",\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Call Finance Service - Get Dashboard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/finance/service/dashboard",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Validate Dashboard Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Gate node between the two read calls this Handler makes -- the Finance\n// Service dashboard fetch, then (only on success) the AI Core reasoning\n// call. Distinguishes a network/response failure from a successful fetch,\n// same class of gate 10-handle-create-expense.json's own \"Validate Expense\n// Extraction\" uses between ITS two calls (AI Core extraction, then the\n// Finance API write) -- this Handler needed the same two-call shape\n// because, unlike GET_BUDGET/GET_DASHBOARD's single-call handlers, there\n// is a second call (AI Core) that must never run against missing/invalid\n// dashboard data.\nconst context = $('Validate Handler Input').item.json;\nconst result = $json;\n\nif (result && result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  console.log(`[Validate Dashboard Response] Finance API call failed: ${message}`);\n  return [{ json: { ...context, dashboardOutcome: 'failed' } }];\n}\n\nif (!result || result.success !== true || !result.data) {\n  console.log(`[Validate Dashboard Response] Finance API returned an unexpected shape: ${JSON.stringify(result)}`);\n  return [{ json: { ...context, dashboardOutcome: 'failed' } }];\n}\n\nreturn [{ json: { ...context, dashboardOutcome: 'valid', dashboard: result.data } }];\n"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Dashboard Fetched?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.dashboardOutcome }}",
+              "rightValue": "valid",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Build Dashboard Failure Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        260
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Finance Service read failure -- never reaches the AI Core call, which\n// has nothing to reason over without real dashboard data. Safe generic\n// message, never raw HTTP/response internals -- same posture as every\n// other Finance Handler's failure path.\nconst v = $json;\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: v.workflowExecutionId,\n    status: 'error',\n    intent: 'GET_FINANCE_QUESTION',\n    message: \"Sorry, I couldn't load your finance data right now. Please try again in a moment.\",\n    data: null,\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Prepare Finance Question Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Builds the AI Core `finance-question` capability's invoke() request\n// body -- {input, context}, the same envelope AiCapabilityController.invokeService\n// expects and every other Finance AI Core call in this repo already uses\n// (docs/adrs/ADR-0014-finance-ai-core-migration.md). input.question is\n// rawText FORWARDED UNCHANGED -- this node deliberately does no parsing of\n// category, comparison, or spending intent out of it; that interpretation\n// is entirely AI Core's job. input.dashboard/input.facts are split from the\n// single dashboard payload \"Validate Dashboard Response\" fetched from the\n// real Finance Service: financeFacts (percentages, ranking, hasBudget,\n// hasCategorySpecificThresholds) is Finance Service's own deterministic,\n// Decimal-safe computation -- forwarded as its own top-level `facts` key so\n// the model never has to divide/sort/rank raw dashboard numbers itself, per\n// the finance-question-brain prompt's \"lookup and restate, never calculate\"\n// contract. Everything else in dashboard is forwarded unmodified as before.\n// context.expectJson is deliberately FALSE (not true, unlike the Router's\n// classification call or CREATE_EXPENSE's extraction call) -- the answer is\n// free-form natural language for a WhatsApp reply, not structured data.\nconst input = $json;\nconst { financeFacts, ...dashboard } = input.dashboard || {};\n\nreturn [{\n  json: {\n    ...input,\n    aiCoreRequestBody: {\n      input: {\n        question: input.rawText,\n        dashboard,\n        facts: financeFacts,\n      },\n      context: {\n        expectJson: false,\n        workflowName: '13-handle-get-finance-question',\n        workflowExecutionId: input.workflowExecutionId,\n      },\n    },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Call AI Core - Answer Finance Question",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "onError": "continueRegularOutput",
+      "position": [
+        1540,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EYAN_API_BASE_URL }}/ai-core/service/capabilities/finance-question/invoke",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.aiCoreRequestBody) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HkpCn7QOHOauRVq1",
+          "name": "EYAN Service API"
+        }
+      }
+    },
+    {
+      "id": "n11",
+      "name": "Validate Finance Question Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Maps AI Core's finance-question capability response onto the Response\n// Contract (ADR-0008 Decision 2). context.expectJson was false on the\n// outbound call, so the entry point here is result.data.output (plain\n// text), never result.data.outputJson -- unlike every other AI-Core-calling\n// node in this Finance domain, this node parses no JSON and enforces no\n// field schema, because the model's answer IS the message, verbatim (after\n// trimming). Grounding in real dashboard data is enforced entirely by the\n// finance-question-brain prompt (eyan-ai-platform) -- this node cannot and\n// does not re-verify that the model didn't invent a number; that is a\n// prompt-engineering guarantee, not a code-level one, same trust boundary\n// every other Finance AI call in this repo already accepts for its own\n// prompt's instructions.\nconst context = $('Validate Dashboard Response').item.json;\nconst result = $json;\n\nfunction errorResponse(message) {\n  return [{\n    json: {\n      contractVersion: '1',\n      workflowExecutionId: context.workflowExecutionId,\n      status: 'error',\n      intent: 'GET_FINANCE_QUESTION',\n      message,\n      data: null,\n      clarifyingQuestion: null,\n    },\n  }];\n}\n\nif (result && result.error) {\n  const message = String((result.error && result.error.message) || result.error);\n  console.log(`[Validate Finance Question Answer] AI Core call failed: ${message}`);\n  return errorResponse(\"Sorry, I couldn't work that out right now. Please try again in a moment.\");\n}\n\nconst data = result && result.data;\n\nif (!data || data.outcome !== 'VALID' || typeof data.output !== 'string' || !data.output.trim()) {\n  console.log(`[Validate Finance Question Answer] AI Core did not return a usable answer (outcome: ${data && data.outcome}).`);\n  return errorResponse(\"Sorry, I couldn't work that out right now. Please try again in a moment.\");\n}\n\nreturn [{\n  json: {\n    contractVersion: '1',\n    workflowExecutionId: context.workflowExecutionId,\n    status: 'success',\n    intent: 'GET_FINANCE_QUESTION',\n    message: data.output.trim(),\n    data: { period: context.dashboard && context.dashboard.period, question: context.rawText },\n    clarifyingQuestion: null,\n  },\n}];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Validate Handler Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Handler Input": {
+      "main": [
+        [
+          {
+            "node": "Handler Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handler Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "Call Finance Service - Get Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Invalid Input Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Finance Service - Get Dashboard": {
+      "main": [
+        [
+          {
+            "node": "Validate Dashboard Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Dashboard Response": {
+      "main": [
+        [
+          {
+            "node": "Dashboard Fetched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dashboard Fetched?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Finance Question Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Dashboard Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Finance Question Input": {
+      "main": [
+        [
+          {
+            "node": "Call AI Core - Answer Finance Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call AI Core - Answer Finance Question": {
+      "main": [
+        [
+          {
+            "node": "Validate Finance Question Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
